@@ -2,13 +2,17 @@ import SwiftUI
 import Supabase
 
 // ---------------------------------------------------------------------------
-// Data model — mirrors the `favorites` table columns
+// Encodable structs — mirror the database table columns exactly
 // ---------------------------------------------------------------------------
+
+private struct UserUpsert: Encodable {
+    let id: UUID
+}
 
 private struct FavoriteInsert: Encodable {
     let user_id: UUID
     let food_item: String
-    let dining_hall_id: String?  // nil = alert from any dining hall
+    let dining_hall_id: String?
 }
 
 // ---------------------------------------------------------------------------
@@ -17,36 +21,25 @@ private struct FavoriteInsert: Encodable {
 
 struct AddFavoriteView: View {
 
-    // MARK: — State
+    // MARK: - State
 
     @State private var foodName: String = ""
     @State private var isLoading: Bool = false
     @State private var successMessage: String? = nil
     @State private var errorMessage: String? = nil
+    @State private var isReady: Bool = false
 
-    // Hardcoded dummy user ID for testing.
-    // Replace this with `SupabaseManager.client.auth.currentUser?.id` once
-    // anonymous authentication is set up (Phase 2 of the roadmap).
-    //
-    // IMPORTANT: For this insert to succeed, Row Level Security on the
-    // `favorites` table must be temporarily DISABLED in the Supabase dashboard
-    // while using a hardcoded UUID that doesn't belong to a real auth session.
-    // Re-enable RLS before shipping.
-    private let dummyUserID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-
-    // MARK: — Body
+    // MARK: - Body
 
     var body: some View {
         NavigationStack {
             Form {
-                // ── Input ─────────────────────────────────────────────────
                 Section(header: Text("What do you want alerts for?")) {
                     TextField("e.g. Spicy With, Honey Yogurt Greek Chicken", text: $foodName)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.words)
                 }
 
-                // ── Action ────────────────────────────────────────────────
                 Section {
                     Button(action: saveFavorite) {
                         HStack {
@@ -55,15 +48,18 @@ struct AddFavoriteView: View {
                                 ProgressView()
                                     .padding(.trailing, 8)
                             }
-                            Text(isLoading ? "Saving…" : "Save Favorite")
+                            Text(isLoading ? "Saving..." : "Save Favorite")
                                 .fontWeight(.semibold)
                             Spacer()
                         }
                     }
-                    .disabled(foodName.trimmingCharacters(in: .whitespaces).isEmpty || isLoading)
+                    .disabled(
+                        foodName.trimmingCharacters(in: .whitespaces).isEmpty
+                        || isLoading
+                        || !isReady
+                    )
                 }
 
-                // ── Feedback ──────────────────────────────────────────────
                 if let success = successMessage {
                     Section {
                         Label(success, systemImage: "checkmark.circle.fill")
@@ -79,10 +75,31 @@ struct AddFavoriteView: View {
                 }
             }
             .navigationTitle("Add Favorite")
+            .task {
+                await registerDevice()
+            }
         }
     }
 
-    // MARK: — Actions
+    // MARK: - Device registration
+
+    /// Upserts this device's UUID into public.users so the foreign key
+    /// from favorites.user_id is always satisfied.
+    /// Requires RLS to be DISABLED on both the users and favorites tables
+    /// in the Supabase dashboard while using this dev-phase auth approach.
+    private func registerDevice() async {
+        do {
+            try await SupabaseManager.client
+                .from("users")
+                .upsert(UserUpsert(id: DeviceID.current))
+                .execute()
+            isReady = true
+        } catch {
+            errorMessage = "Device registration failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Save
 
     private func saveFavorite() {
         let trimmed = foodName.trimmingCharacters(in: .whitespaces)
@@ -95,9 +112,9 @@ struct AddFavoriteView: View {
         Task {
             do {
                 let row = FavoriteInsert(
-                    user_id: dummyUserID,
+                    user_id: DeviceID.current,
                     food_item: trimmed,
-                    dining_hall_id: nil   // nil = match this item at any dining hall
+                    dining_hall_id: nil
                 )
 
                 try await SupabaseManager.client
@@ -106,7 +123,7 @@ struct AddFavoriteView: View {
                     .execute()
 
                 await MainActor.run {
-                    successMessage = ""\(trimmed)" saved! You'll be notified when it's served."
+                    successMessage = "\"\(trimmed)\" saved! You will be notified when it is served."
                     foodName = ""
                     isLoading = false
                 }

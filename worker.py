@@ -6,15 +6,18 @@ Google Cloud Scheduler). Execution order:
 
   1. Fetch the Brown Dining API JSON (~2.5 MB, covers all halls for a week).
   2. Parse every recipe item being served *today* across all dining halls.
-  3. Load all user favorites from Supabase (uses service_role key → bypasses RLS).
-  4. Cross-reference favorites against today's menu with hall-scoping logic.
-  5. Print a match log. (Real APNs dispatch replaces the print() calls in Phase 4.)
+  3. Sync today's menu into the Supabase daily_menus table so the iOS app
+     can read it without ever hitting the Brown API directly.
+  4. Load all user favorites from Supabase (uses service_role key → bypasses RLS).
+  5. Cross-reference favorites against today's menu with hall-scoping logic.
+  6. Print a match log. (Real APNs dispatch replaces the print() calls in Phase 4.)
 
 Required environment variables:
   SUPABASE_URL   — your project URL, e.g. https://xyzxyz.supabase.co
   SUPABASE_KEY   — the *service_role* secret key (never the anon key).
                    The service_role key bypasses Row Level Security so the
-                   worker can read every user's favorites and APN tokens.
+                   worker can read every user's favorites and APN tokens,
+                   and write to daily_menus.
 
 Optional (for local dev):
   Place a .env file in the same directory and install python-dotenv.
@@ -177,7 +180,71 @@ def build_menu_index(entries: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Load favorites from Supabase
+# Step 3 — Sync today's menu into Supabase daily_menus
+# ---------------------------------------------------------------------------
+
+# Rows are batched to stay well under PostgREST's default request-size limit.
+_BATCH_SIZE = 400
+
+
+def sync_daily_menu(sb: Client, entries: list[dict], today: str = TODAY) -> None:
+    """
+    Persist today's parsed menu entries into the daily_menus table so the
+    iOS app can query Supabase instead of hitting the Brown Dining API directly.
+
+    Two-phase approach:
+      1. DELETE rows whose date is strictly before today, keeping the table
+         lean (one day of data is all the iOS app ever needs).
+      2. INSERT today's rows in batches of _BATCH_SIZE, using
+         ON CONFLICT DO NOTHING so re-running the worker mid-day is safe.
+    """
+    # ── Phase 1: prune stale rows ────────────────────────────────────────────
+    prune_resp = (
+        sb.table("daily_menus")
+        .delete()
+        .lt("date", today)   # strictly less than today → removes yesterday and older
+        .execute()
+    )
+    pruned = len(prune_resp.data) if prune_resp.data else 0
+    if pruned:
+        log.info("Pruned %d stale daily_menus row(s) from before %s.", pruned, today)
+
+    if not entries:
+        log.warning("No menu entries to sync for today (%s).", today)
+        return
+
+    # ── Phase 2: insert today's menu ─────────────────────────────────────────
+    rows = [
+        {
+            "date":             today,
+            "dining_hall_id":   e["location_id"],
+            "dining_hall_name": e["location_name"],
+            "meal_period":      e["meal_period"],
+            "station":          e["station"],
+            "food_item":        e["food_item"],
+        }
+        for e in entries
+    ]
+
+    inserted = 0
+    for i in range(0, len(rows), _BATCH_SIZE):
+        batch = rows[i : i + _BATCH_SIZE]
+        sb.table("daily_menus").upsert(
+            batch,
+            on_conflict="date,dining_hall_id,meal_period,station,food_item",
+        ).execute()
+        inserted += len(batch)
+
+    log.info(
+        "Synced %d menu item(s) for %s into daily_menus (%d batch(es)).",
+        inserted,
+        today,
+        -(-len(rows) // _BATCH_SIZE),  # ceiling division
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Load favorites from Supabase
 # ---------------------------------------------------------------------------
 
 
@@ -374,17 +441,20 @@ def main() -> None:
 
     menu_index = build_menu_index(menu_entries)
 
-    # ── 3. Load user favorites from Supabase ─────────────────────────────────
+    # ── 3. Sync today's menu into Supabase daily_menus ───────────────────────
+    sync_daily_menu(sb, menu_entries)
+
+    # ── 4. Load user favorites from Supabase ─────────────────────────────────
     favorites = load_favorites(sb)
 
     if not favorites:
         log.info("No favorites stored in the database yet. Nothing to match.")
         return
 
-    # ── 4. Cross-reference ───────────────────────────────────────────────────
+    # ── 5. Cross-reference ───────────────────────────────────────────────────
     matches = find_matches(favorites, menu_index)
 
-    # ── 5. Print match log (replace with APNs dispatch in Phase 4) ───────────
+    # ── 6. Print match log (replace with APNs dispatch in Phase 4) ───────────
     log_matches(matches)
 
     log.info("Worker finished successfully.")

@@ -1,21 +1,18 @@
-//
-//  ContentView.swift
-//  Bear Bites
-//
-//  Created by Michael Xu on 3/3/26.
-//
-
 import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        TabView {
+            MenuBrowsingView()
+                .tabItem {
+                    Label("Menu", systemImage: "fork.knife")
+                }
+
+            AddFavoriteView()
+                .tabItem {
+                    Label("Add Favorite", systemImage: "plus.circle")
+                }
         }
-        .padding()
     }
 }
 
