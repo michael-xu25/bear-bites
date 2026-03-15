@@ -10,7 +10,16 @@ import Supabase
 enum SupabaseManager {
     static let client = SupabaseClient(
         supabaseURL: URL(string: "https://urfgilgpmacqslxfnrtz.supabase.co")!,
-        supabaseKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyZmdpbGdwbWFjcXNseGZucnR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1NjcyOTksImV4cCI6MjA4ODE0MzI5OX0.dnVNSvcfLsfobzos6IxI2yxQXC6FU7jscrprf1evHKk"
+        supabaseKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyZmdpbGdwbWFjcXNseGZucnR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1NjcyOTksImV4cCI6MjA4ODE0MzI5OX0.dnVNSvcfLsfobzos6IxI2yxQXC6FU7jscrprf1evHKk",
+        options: SupabaseClientOptions(
+            auth: SupabaseClientOptions.AuthOptions(
+                // We use DeviceID (UserDefaults) instead of Supabase Auth for now.
+                // Disabling auto-refresh stops the SDK from attempting a session
+                // refresh on every launch, which was causing the slow startup and
+                // the "emitLocalSessionAsInitialSession" warning.
+                autoRefreshToken: false
+            )
+        )
     )
 }
 

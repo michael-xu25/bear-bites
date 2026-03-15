@@ -1,19 +1,46 @@
-# BearBites 🐻
+# BearBites
 ### Never Miss Your Favorite Meal at Brown
 
-BearBites is an iOS app that sends Brown University students a push notification whenever a meal they love is being served at a campus dining hall — the Ratty, V-Dub, Andrews, and more. No more wandering to the Ratty only to find the pizza station is closed. Set your favorites once and let BearBites come to you.
+BearBites is an iOS app that sends Brown University students a push notification whenever a meal they love is being served at a campus dining hall. Set your favorites once and let BearBites come to you.
 
 ---
 
 ## Table of Contents
 
-1. [Tech Stack](#tech-stack)
-2. [System Architecture](#system-architecture)
-3. [Notification Flow](#notification-flow)
-4. [JSON Schema Reference](#json-schema-reference)
-5. [Python Parser Snippet](#python-parser-snippet)
-6. [Development Roadmap](#development-roadmap)
-7. [Dining Hall Reference](#dining-hall-reference)
+1. [Current State](#current-state)
+2. [Tech Stack](#tech-stack)
+3. [Project Structure](#project-structure)
+4. [System Architecture](#system-architecture)
+5. [Database Schema](#database-schema)
+6. [Running the Worker](#running-the-worker)
+7. [Xcode Guide](#xcode-guide)
+8. [Agent Notes: Editing Files](#agent-notes-editing-files)
+9. [Remaining Roadmap](#remaining-roadmap)
+10. [Dining Hall Reference](#dining-hall-reference)
+11. [Brown Dining API Reference](#brown-dining-api-reference)
+
+---
+
+## Current State
+
+### What is built and working
+
+| Component | Status | Description |
+|---|---|---|
+| Supabase database | Done | 3 tables: `users`, `favorites`, `daily_menus` |
+| `worker.py` | Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites |
+| `SupabaseManager.swift` | Done | Shared Supabase client + persistent `DeviceID` |
+| `MenuBrowsingView.swift` | Done | Fetches menu from Supabase, grouped by hall + meal period, heart-to-favorite |
+| `AddFavoriteView.swift` | Done | Type a food name and save it directly to `favorites` |
+| `ContentView.swift` | Done | TabView with Menu tab and Add Favorite tab |
+
+### What is NOT yet built
+
+- Favorites list view (see saved favorites, delete them)
+- Real push notification dispatch (worker prints matches but doesn't send APNs)
+- Supabase Auth (currently using a `DeviceID` UUID stored in `UserDefaults`)
+- APNs token registration
+- Search, allergen filters, settings
 
 ---
 
@@ -21,132 +48,209 @@ BearBites is an iOS app that sends Brown University students a push notification
 
 | Layer | Technology |
 |---|---|
-| **iOS Frontend** | Swift / SwiftUI |
-| **Push Notifications** | Apple Push Notification service (APNs) via Firebase Cloud Messaging (FCM) |
-| **Backend Worker** | Python (Google Cloud Function or GitHub Actions Cron Job) |
-| **Database** | Firebase Firestore |
-| **Auth** | Firebase Authentication (Sign in with Apple) |
-| **Source API** | Brown Dining Services — `https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus` |
+| iOS Frontend | Swift / SwiftUI (Xcode 16) |
+| Push Notifications | Apple Push Notification service (APNs) — not yet wired |
+| Backend Worker | Python 3, runs daily via cron / GitHub Actions / Cloud Scheduler |
+| Database | Supabase (PostgreSQL) |
+| Auth | DeviceID via UserDefaults (real Supabase anonymous auth planned) |
+| Source API | Brown Dining Services — `https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus` |
+
+---
+
+## Project Structure
+
+```
+BearBites/
+├── worker.py                        # Python backend worker
+├── requirements.txt                 # Python dependencies
+├── .env                             # Local env vars (never committed)
+├── supabase_schema.sql              # users + favorites table DDL
+├── add_daily_menus_table.sql        # daily_menus table DDL
+│
+└── BearBitesApp/
+    └── Bear Bites/
+        ├── Bear_BitesApp.swift      # App entry point
+        ├── ContentView.swift        # TabView root
+        ├── MenuBrowsingView.swift   # Browse today's menu, tap to favorite
+        ├── AddFavoriteView.swift    # Type a food name to add a favorite
+        ├── Assets.xcassets/
+        └── Services/
+            └── SupabaseManager.swift  # Supabase client + DeviceID
+```
 
 ---
 
 ## System Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                        BACKEND WORKER                             │
-│          (Python Cloud Function, runs every 60 minutes)           │
-│                                                                   │
-│  1. Fetch 2.5 MB JSON from Brown Dining API  ──────────────────► │
-│  2. Parse schema (location → date → meal → station → items)       │
-│  3. Flatten into normalized menu records                          │
-│  4. Upsert into Firestore  ──────────────────────────────────────►│
-└───────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌────────────────────┐        ┌──────────────────────────────┐
-│     Firestore DB   │        │        iOS App (SwiftUI)     │
-│                    │        │                              │
-│  menus/            │◄──────►│  • Browse today's menus      │
-│  users/            │        │  • Search & favorite recipes │
-│    └─ favorites[]  │        │  • Receive push alerts       │
-└────────────────────┘        └──────────────────────────────┘
-         │
-         ▼
-┌───────────────────────────────────────────────────────────────────┐
-│                    NOTIFICATION TRIGGER WORKER                    │
-│          (runs once at ~7 AM daily, or on menu upsert)            │
-│                                                                   │
-│  1. Read today's flattened menu from Firestore                    │
-│  2. Read all users' favorites lists from Firestore                │
-│  3. Intersect: favorites ∩ today's menu items                     │
-│  4. For each match → send FCM → APNs → user's iPhone             │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-### Why a Backend Middleman?
-
-The raw Brown Dining API response is **~2.5 MB of JSON** covering all dining halls for a full week. If the iOS app fetched this directly:
-
-- 1,000 concurrent users at lunchtime = **2.5 GB of Brown API traffic in one minute**
-- Risk of rate-limiting or an accidental denial-of-service on Brown's infrastructure
-- Slow app startup (parsing 2.5 MB on-device on every launch)
-- Wasted battery and data on parsing data for halls the user doesn't care about
-
-The backend worker fetches this payload **once per hour**, parses it, and writes only the relevant structured records into Firestore. The iOS app then reads a tiny, pre-parsed document — typically under 10 KB per dining hall per day.
-
----
-
-## Notification Flow
-
-```
-7:00 AM daily trigger
+Brown Dining API (2.5 MB JSON, updated daily)
+        │
+        ▼ (once per day, run worker.py)
+┌─────────────────────────────────────────┐
+│           worker.py                     │
+│  1. Fetch Brown Dining API              │
+│  2. Parse today's recipes               │
+│  3. Sync → Supabase daily_menus table   │
+│  4. Load user favorites from Supabase   │
+│  5. Cross-reference favorites vs menu   │
+│  6. Print match log (APNs comes later)  │
+└─────────────────────────────────────────┘
         │
         ▼
-Cloud Function: notification_worker.py
-        │
-        ├─► Query Firestore: menus/{today}/{hall}/lunch/items[]
-        │         (flat list of recipe names being served today)
-        │
-        ├─► Query Firestore: users/ (all documents)
-        │         Each user doc contains: { fcmToken, favorites: ["Honey Yogurt Greek Chicken", ...] }
-        │
-        ├─► For each user:
-        │       matches = set(user.favorites) ∩ set(today_menu_items)
-        │       if matches:
-        │           send FCM message to user.fcmToken
-        │               title: "Your favorites are at the Ratty today!"
-        │               body:  "Honey Yogurt Greek Chicken · Taco Filling Beef"
-        │
-        └─► Log delivery receipts to Firestore
+┌─────────────────────┐      ┌──────────────────────────────┐
+│   Supabase DB       │      │       iOS App (SwiftUI)      │
+│                     │      │                              │
+│  users              │◄────►│  MenuBrowsingView            │
+│  favorites          │      │    reads daily_menus         │
+│  daily_menus        │      │    writes favorites          │
+└─────────────────────┘      └──────────────────────────────┘
 ```
 
-**APNs delivery path:** Python backend → Firebase Cloud Messaging → Apple Push Notification service → user's iPhone
+### Why the iOS app never touches the Brown API directly
 
-Users can configure:
-- Which dining halls to watch
-- Which meal periods to alert on (Breakfast / Lunch / Dinner)
-- Alert timing (e.g., 30 min before service opens)
+The raw Brown Dining API payload is ~2.5 MB covering all 7 halls for a full week.
+
+- 1,000 students opening the app at lunch = **2.5 GB of traffic per minute to Brown's servers**
+- Risk of rate-limiting or an accidental DDoS on university infrastructure
+- Slow app startup parsing 2.5 MB on-device every launch
+
+The worker fetches this **once per day**, parses it, and writes only the relevant structured rows into `daily_menus`. The iOS app reads a tiny, pre-parsed subset — a few KB per query.
 
 ---
 
-## JSON Schema Reference
+## Database Schema
 
-The source API returns a **JSON array of 7 location objects**. Here is the annotated hierarchy:
+### `users`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | Set to `DeviceID.current` from the iOS app |
+| `created_at` | TIMESTAMPTZ | Auto |
+| `apn_token` | TEXT | Apple Push token — populated later |
 
+### `favorites`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | Auto |
+| `created_at` | TIMESTAMPTZ | Auto |
+| `user_id` | UUID FK → users | |
+| `food_item` | TEXT | Exact recipe name, e.g. "Honey Yogurt Greek Chicken" |
+| `dining_hall_id` | TEXT nullable | e.g. "SHRP". NULL = match at any hall |
+
+### `daily_menus`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | UUID PK | Auto |
+| `date` | DATE | "YYYY-MM-DD" |
+| `dining_hall_id` | TEXT | e.g. "SHRP" |
+| `dining_hall_name` | TEXT | e.g. "Sharpe Refectory" |
+| `meal_period` | TEXT | "Breakfast", "Lunch", or "Dinner" |
+| `station` | TEXT | e.g. "Soups", "Grill" |
+| `food_item` | TEXT | e.g. "Honey Yogurt Greek Chicken" |
+
+**RLS rules:**
+- `users` + `favorites`: RLS currently **disabled** for development. Re-enable when real auth is added.
+- `daily_menus`: RLS **enabled**. Anyone can SELECT. Only the `service_role` key (worker) can write.
+
+---
+
+## Running the Worker
+
+```bash
+# Install dependencies (one-time)
+pip3 install -r requirements.txt
+
+# Run
+python3 worker.py
 ```
-Array (7 locations)
-└── Location Object
-    ├── name          : String   — Display name, e.g. "Sharpe Refectory"
-    ├── locationId    : String   — Short ID, e.g. "SHRP"
-    ├── locationAddress: String  — Street address
-    └── meals         : Object   — Keys are ISO date strings ("YYYY-MM-DD")
-        └── "2026-03-03": Array  — List of meal periods for that date
-            └── Meal Period Object
-                ├── name  : String — Long name, e.g. "Sharpe Spring Lunch"
-                ├── meal  : String — Period type: "Breakfast" | "Lunch" | "Dinner"
-                └── menu  : Object
-                    ├── date   : String  — "YYYY-MM-DD"
-                    ├── hours  : Object
-                    │   ├── start : String — ISO 8601 timestamp with TZ offset
-                    │   └── end   : String — ISO 8601 timestamp with TZ offset
-                    └── stations: Array   — List of food stations
-                        └── Station Object
-                            ├── stationId : Integer — Numeric station ID
-                            ├── name      : String  — e.g. "Soups", "Grill", "Pizza"
-                            └── items     : Array   — List of food items
-                                └── Item Object
-                                    ├── itemId    : Integer — Unique recipe/ingredient ID
-                                    ├── item      : String  — ★ The food name (key field)
-                                    ├── itemType  : String  — "recipe" | "ingredient"
-                                    ├── allergens : Array   — e.g. ["DAIRY", "WHEAT/GLUTEN"]
-                                    ├── icons     : Array   — Dietary icons (vegan, halal, etc.)
-                                    └── description: String — Optional description
+
+Requires a `.env` file in the project root:
+```
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-service-role-key
 ```
 
-**Key insight:** The food name you want to match against user favorites is always `item` inside each element of `station.items`. Filter by `itemType == "recipe"` to ignore raw ingredients and focus on named dishes.
+Use the **`service_role`** key (not the anon key) — it bypasses RLS so the worker can read all users and write to `daily_menus`.
 
-### Dining Hall Location IDs
+The worker:
+1. Hits the Brown Dining API
+2. Parses ~430 recipe items for today
+3. Deletes stale `daily_menus` rows from previous days
+4. Upserts today's rows in batches of 400
+5. Loads all favorites and prints a match log
+
+---
+
+## Xcode Guide
+
+### First-time setup
+
+1. Open `BearBitesApp/Bear Bites.xcodeproj` in Xcode
+2. In the top toolbar, click the destination selector (it says "Any iOS Device" by default) and pick a **simulator** like "iPhone 17 Pro"
+3. Hit **Cmd+R** or the ▶ play button to build and run
+
+### Running on a real device
+
+1. Connect your iPhone with a **data cable** (not a charge-only cable — if the "Trust This Computer?" prompt never appears, the cable is charge-only)
+2. Unlock your phone and tap **Trust** when prompted
+3. Go to **Settings → Privacy & Security → Developer Mode** and enable it
+4. Your device will appear in the destination selector — select it and hit ▶
+
+### The preview canvas vs running the app
+
+The **preview canvas** (right panel in Xcode) is a static sandbox. It renders the UI but **cannot make network calls**. Hearts won't fire, menus won't load. Always use **Cmd+R** to run in the full simulator or on a device for any feature that touches Supabase.
+
+### Clean build
+
+If the app seems to be running old code after changes, do:
+**Product → Clean Build Folder** (Cmd+Shift+K), then **Cmd+R**.
+
+---
+
+## Agent Notes: Editing Files
+
+This project uses **Xcode 16's automatic filesystem sync** (`PBXFileSystemSynchronizedRootGroup`). This means:
+
+**Any `.swift` file placed inside `BearBitesApp/Bear Bites/` on disk is automatically compiled** — you do not need to manually add files to `project.pbxproj`. There is no `AddFavoriteView` entry in the project file; Xcode picks it up from the directory.
+
+### What this means for an AI agent
+
+- Edit files directly at their path on disk (e.g. `BearBitesApp/Bear Bites/MenuBrowsingView.swift`). Xcode will detect the change and recompile on the next build.
+- To create a new Swift view, write it to the correct folder. Xcode will include it automatically.
+- **Do not** try to patch `project.pbxproj` to register files — it is not needed.
+- After editing, the user must hit **Cmd+R** in Xcode to rebuild. If changes don't seem to take effect, suggest **Cmd+Shift+K** (Clean) then **Cmd+R**.
+
+### Known gotchas
+
+- **Smart quotes and curly apostrophes** (`"`, `"`, `'`, `…`) inside Swift string literals cause `Consecutive statements on a line must be separated by ';'` compile errors. Always use straight ASCII characters in Swift files.
+- The **Supabase Swift SDK warns** about `emitLocalSessionAsInitialSession` on launch unless `autoRefreshToken: false` is set in `SupabaseClientOptions`. This is set in `SupabaseManager.swift`.
+- **`DeviceID`** is defined in `SupabaseManager.swift` and shared across all views. Do not redefine it locally in individual views.
+- **Foreign key constraint**: inserting into `favorites` requires a matching row in `users` first. `AddFavoriteView` and `MenuBrowsingView` both call `registerDevice()` which upserts into `users` before any favorites insert.
+
+---
+
+## Remaining Roadmap
+
+### Next: Favorites List View
+A screen showing everything the user has favorited, with a delete button. Query `favorites` filtered by `DeviceID.current`.
+
+### After that: Real Auth
+Replace `DeviceID` (UserDefaults UUID) with `supabase.auth.signInAnonymously()`. Re-enable RLS on `users` and `favorites`. The anonymous auth approach was designed for this from the start — the `users.id` primary key equals the Supabase Auth UUID, so the switch is clean.
+
+### Then: Push Notifications
+1. Request APNs permission on app launch
+2. Upload the device token to `users.apn_token`
+3. In `worker.py`, replace the `print()` match log with real APNs HTTP/2 calls using the `.p8` auth key
+
+### Polish
+- Search across today's menu
+- Allergen filter
+- Hall and meal period filter
+- Home screen widget
+- TestFlight → App Store
+
+---
+
+## Dining Hall Reference
 
 | `locationId` | Display Name | Nickname |
 |---|---|---|
@@ -156,191 +260,39 @@ Array (7 locations)
 | `JOS` | Josiah's | Jo's |
 | `BR` | Blue Room | Blue Room |
 | `IVY` | Ivy Room | Ivy Room |
-| `SOE` | School of Engineering | SEANERD Café |
+| `SOE` | School of Engineering | SEANERD Cafe |
 
 ---
 
-## Python Parser Snippet
+## Brown Dining API Reference
 
-This snippet demonstrates how to fetch the API, parse the schema, and print the **Lunch menu for Sharpe Refectory** for the first available date. All key lookups are guarded against missing data.
+**Endpoint:** `GET https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus`
 
-```python
-import json
-import urllib.request
-from collections import defaultdict
+Returns a JSON array of 7 location objects covering a full week of menus.
 
-API_URL = "https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus"
-
-
-def fetch_menus(url: str = API_URL) -> list:
-    """Fetch and decode the Brown Dining JSON payload."""
-    with urllib.request.urlopen(url) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def get_meal_items(
-    menus: list,
-    location_id: str,
-    date: str | None = None,
-    meal_period: str = "Lunch",
-    recipes_only: bool = True,
-) -> dict[str, list[str]]:
-    """
-    Parse the menus payload and return a dict of {station_name: [item_names]}
-    for the given location, date, and meal period.
-
-    Args:
-        menus:       The top-level list returned by the API.
-        location_id: e.g. "SHRP" for Sharpe Refectory.
-        date:        "YYYY-MM-DD". Defaults to the first available date.
-        meal_period: "Breakfast", "Lunch", or "Dinner".
-        recipes_only: If True, skips raw ingredients and returns only named recipes.
-
-    Returns:
-        Ordered dict of {station_name: [food_item_name, ...]}
-    """
-    # Find the matching location
-    location = next(
-        (loc for loc in menus if loc.get("locationId") == location_id), None
-    )
-    if location is None:
-        print(f"Location '{location_id}' not found.")
-        return {}
-
-    all_meals: dict = location.get("meals", {})
-    if not all_meals:
-        print(f"No meal data for location '{location_id}'.")
-        return {}
-
-    # Default to first available date if none specified
-    if date is None:
-        date = sorted(all_meals.keys())[0]
-
-    day_meals: list = all_meals.get(date, [])
-    if not day_meals:
-        print(f"No meals found for {location_id} on {date}.")
-        return {}
-
-    # Find the matching meal period
-    period = next(
-        (m for m in day_meals if m.get("meal", "").lower() == meal_period.lower()),
-        None,
-    )
-    if period is None:
-        print(f"No '{meal_period}' period found for {location_id} on {date}.")
-        return {}
-
-    stations: list = period.get("menu", {}).get("stations", [])
-    result: dict[str, list[str]] = defaultdict(list)
-
-    for station in stations:
-        station_name: str = station.get("name", "Unknown Station")
-        for item in station.get("items", []):
-            if recipes_only and item.get("itemType") != "recipe":
-                continue
-            food_name = item.get("item", "").strip()
-            if food_name:
-                result[station_name].append(food_name)
-
-    return dict(result)
-
-
-# ── Demo ──────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("Fetching Brown Dining menus...")
-    menus = fetch_menus()
-
-    location_id = "SHRP"
-    meal_period = "Lunch"
-
-    # Use first available date
-    sharpe = next(loc for loc in menus if loc.get("locationId") == location_id)
-    first_date = sorted(sharpe.get("meals", {}).keys())[0]
-
-    print(f"\n{'='*60}")
-    print(f"  {sharpe['name']} — {meal_period} — {first_date}")
-    print(f"{'='*60}")
-
-    menu_by_station = get_meal_items(menus, location_id, first_date, meal_period)
-
-    if not menu_by_station:
-        print("  (No items found)")
-    else:
-        for station, items in menu_by_station.items():
-            print(f"\n  [{station}]")
-            for item in items:
-                print(f"    • {item}")
-
-    # ── Example: check if a user's favorites are being served ─────────────────
-    print(f"\n{'='*60}")
-    print("  Favorites Check")
-    print(f"{'='*60}")
-
-    user_favorites = {"Honey Yogurt Greek Chicken", "Taco Filling Beef", "Sushi"}
-    all_items_today = {
-        item
-        for items in menu_by_station.values()
-        for item in items
-    }
-    matches = user_favorites & all_items_today
-
-    if matches:
-        print(f"\n  ✓ Your favorites being served today at the Ratty ({meal_period}):")
-        for match in sorted(matches):
-            print(f"    → {match}")
-    else:
-        print("\n  ✗ None of your favorites are being served today.")
+```
+Array (7 locations)
+└── Location Object
+    ├── name          : String   — e.g. "Sharpe Refectory"
+    ├── locationId    : String   — e.g. "SHRP"
+    └── meals         : Object   — keys are "YYYY-MM-DD" date strings
+        └── "2026-03-03": Array
+            └── Meal Period Object
+                ├── meal  : String — "Breakfast" | "Lunch" | "Dinner"
+                └── menu.stations: Array
+                    └── Station Object
+                        ├── name  : String — e.g. "Soups"
+                        └── items : Array
+                            └── Item Object
+                                ├── item      : String — the food name (key field)
+                                ├── itemType  : String — "recipe" | "ingredient"
+                                ├── allergens : Array
+                                └── icons     : Array — vegan, halal, etc.
 ```
 
----
-
-## Development Roadmap
-
-### Phase 1 — Backend Parser & Database
-- [ ] Set up a Firebase project (Firestore + FCM)
-- [ ] Write `parser.py` — fetches the Brown API and flattens the schema into Firestore documents following the structure: `menus/{YYYY-MM-DD}/{locationId}/{mealPeriod}/items[]`
-- [ ] Deploy `parser.py` as a Google Cloud Function with a Cloud Scheduler trigger (every 60 minutes)
-- [ ] Write unit tests for the parser against a cached copy of the JSON payload
-- [ ] Handle edge cases: missing `stations`, empty `items`, API downtime (exponential backoff + cached fallback)
-
-### Phase 2 — Database Schema & User Model
-- [ ] Design Firestore schema:
-  - `menus/{date}/{locationId}/{mealPeriod}` → `{ items: [{itemId, name, station, allergens}], hours: {start, end} }`
-  - `users/{uid}` → `{ fcmToken, favorites: [itemId], watchedHalls: [locationId], alertMeals: ["Lunch", "Dinner"] }`
-- [ ] Write Firestore security rules (users can only read/write their own document)
-- [ ] Set up Firebase Authentication with Sign in with Apple
-
-### Phase 3 — SwiftUI Frontend
-- [ ] Project setup: Xcode project, add Firebase iOS SDK via Swift Package Manager
-- [ ] **Meals tab:** Browse today's menu by dining hall, collapsible by station
-- [ ] **Search:** Full-text search across all items for the current day
-- [ ] **Favorites:** Tap the ★ on any recipe to add it to your favorites list; sync to Firestore user doc
-- [ ] **Settings:** Choose which halls to watch, which meal periods to alert on, alert lead time
-- [ ] Request push notification permissions on first launch; upload APNs token to Firestore
-
-### Phase 4 — Push Notification Integration
-- [ ] Upload APNs `.p8` auth key to Firebase Console
-- [ ] Write `notifier.py` Cloud Function — triggered once daily at 7 AM ET
-  - Reads today's flattened menu from Firestore
-  - Reads all user documents
-  - Computes `user.favorites ∩ today_menu_items` per user
-  - Sends batched FCM messages to matching users
-- [ ] Deep-link push notification taps to the correct dining hall + meal period screen
-- [ ] Add "quiet hours" logic (respect Do Not Disturb preferences stored per user)
-- [ ] Track delivery and open rates in Firestore for analytics
-
-### Phase 5 — Polish & Launch
-- [ ] App icon and splash screen
-- [ ] Allergen filter (hide items containing user-specified allergens)
-- [ ] Widget extension — show today's favorites on the home screen
-- [ ] TestFlight beta with Brown students
-- [ ] App Store submission
+Filter `itemType == "recipe"` to skip raw ingredients like "Butter" and "Salt".
 
 ---
-
-## Contributing
-
-Pull requests welcome. Please open an issue first to discuss any major changes.
 
 ## License
 
