@@ -206,6 +206,27 @@ If the app seems to be running old code after changes, do:
 
 ---
 
+## Agent Notes: Supabase Quick Reference
+
+- Anonymous auth works but must be explicitly enabled in Supabase Dashboard → Authentication → Providers → Anonymous. Wait ~30 seconds after saving before testing — settings take time to propagate. Verify it's live with:
+  ```bash
+  curl -X POST "https://urfgilgpmacqslxfnrtz.supabase.co/auth/v1/signup" \
+    -H "apikey: YOUR_ANON_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{}'
+  ```
+  If it returns an `access_token`, anonymous auth is live. If it returns an error, the setting hasn't propagated yet.
+
+- Always upsert into `users` before inserting into `favorites` due to the FK constraint (`favorites.user_id → users.id`). If you skip this, every favorites insert will fail with `violates foreign key constraint`.
+
+- RLS is currently **disabled** on `users` and `favorites`. Re-enable it when real anonymous auth is wired up — the policies are already written in `supabase_schema.sql` and just need to be switched back on.
+
+- `daily_menus` has RLS **enabled** with a public read policy. The worker writes to it using the `service_role` key which bypasses RLS entirely. The iOS app reads it with the anon key.
+
+- The `service_role` key is in `.env` (backend only). The `anon` key is in `SupabaseManager.swift` (iOS app). Never swap these.
+
+---
+
 ## Agent Notes: Editing Files
 
 This project uses **Xcode 16's automatic filesystem sync** (`PBXFileSystemSynchronizedRootGroup`). This means:
