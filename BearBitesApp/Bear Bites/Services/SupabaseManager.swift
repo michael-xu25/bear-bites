@@ -14,13 +14,41 @@ enum SupabaseManager {
         options: SupabaseClientOptions(
             auth: SupabaseClientOptions.AuthOptions(
                 // We use DeviceID (UserDefaults) instead of Supabase Auth for now.
-                // Disabling auto-refresh stops the SDK from attempting a session
-                // refresh on every launch, which was causing the slow startup and
-                // the "emitLocalSessionAsInitialSession" warning.
-                autoRefreshToken: false
+                // autoRefreshToken: false stops the SDK from attempting session
+                // refreshes on launch. emitLocalSessionAsInitialSession: true
+                // opts into the new SDK behavior that suppresses the startup warning.
+                autoRefreshToken: false,
+                emitLocalSessionAsInitialSession: true
             )
         )
     )
+}
+
+// ---------------------------------------------------------------------------
+// DeviceID — persistent anonymous device identity.
+//
+// Generates a UUID on first launch, stores it in UserDefaults, and reuses it
+// on every subsequent launch. Used as the user_id for the users + favorites
+// tables until real Supabase Auth is wired up in a later phase.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// APNs token upload — called by AppDelegate after registration succeeds.
+// ---------------------------------------------------------------------------
+
+extension SupabaseManager {
+    static func uploadAPNSToken(_ token: String) async {
+        do {
+            try await client
+                .from("users")
+                .update(["apn_token": token])
+                .eq("id", value: DeviceID.current.uuidString)
+                .execute()
+            print("[BearBites] APNs token uploaded: \(token.prefix(8))...")
+        } catch {
+            print("[BearBites] Failed to upload APNs token: \(error.localizedDescription)")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

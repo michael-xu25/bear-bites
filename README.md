@@ -42,6 +42,11 @@ BearBites is an iOS app that sends Brown University students a push notification
 - APNs token registration
 - Search, allergen filters, settings
 
+### Recently fixed
+
+- **Duplicate menu items:** The same dish appearing at multiple stations within a meal period now shows only once in the list (deduplicated by food name in the `grouped` computed property).
+- **Heart persistence:** Tapping a heart now reliably saves to Supabase and survives app relaunches. Fixed two stacked bugs: (1) `MenuBrowsingView` was not calling `registerDevice()` before inserting into `favorites`, causing a silent FK violation; (2) heart state was keyed to daily_menus row UUIDs (which change daily) instead of food item names. Hearts now restore correctly on every launch via `loadFavorites()`. Tapping a hearted item a second time un-favorites it.
+
 ---
 
 ## Tech Stack
@@ -256,6 +261,9 @@ A screen showing everything the user has favorited, with a delete button. Query 
 
 ### After that: Real Auth
 Replace `DeviceID` (UserDefaults UUID) with `supabase.auth.signInAnonymously()`. Re-enable RLS on `users` and `favorites`. The anonymous auth approach was designed for this from the start — the `users.id` primary key equals the Supabase Auth UUID, so the switch is clean.
+
+### Optional account sign-in (Google / Sign in with Apple)
+Give users the option to link their anonymous device account to a Google or Apple ID so their favorites sync across devices. Device-local favorites remain the default — sign-in is never required. When a user signs in, migrate their existing device favorites to the authenticated account.
 
 ### Then: Push Notifications
 1. Request APNs permission on app launch

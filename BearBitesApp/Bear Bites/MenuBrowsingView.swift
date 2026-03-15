@@ -24,6 +24,17 @@ private struct FavoriteInsert: Encodable {
     let dining_hall_id: String
 }
 
+/// Row read back from favorites to restore heart state across launches.
+private struct FavoriteRow: Decodable {
+    let food_item: String
+    let dining_hall_id: String?
+}
+
+/// Upserted into users to satisfy the FK before any favorites write.
+private struct UserUpsert: Encodable {
+    let id: UUID
+}
+
 // ---------------------------------------------------------------------------
 // MARK: - Helpers
 // ---------------------------------------------------------------------------
@@ -51,18 +62,21 @@ struct MenuBrowsingView: View {
     @State private var isLoading = true
     @State private var errorMessage: String? = nil
 
-    /// IDs of daily_menus rows the user has favorited this session.
-    /// Used to toggle the heart icon optimistically without a round-trip.
-    @State private var favoritedIDs: Set<UUID> = []
+    /// Food item names the user has favorited, persisted to Supabase.
+    /// Keyed by food_item name (not daily_menus row ID) so the state
+    /// survives the worker re-syncing rows with new UUIDs each day.
+    @State private var favoritedFoods: Set<String> = []
 
     // MARK: Computed grouping
 
     /// Groups items into a sorted array of dining halls, each containing
     /// a sorted array of meal periods with their respective food items.
+    /// Items are deduplicated by food_item name within each hall+period
+    /// so a dish appearing at multiple stations only shows once.
     ///
     ///   grouped
     ///   └── (hallName, hallID, periods)
-    ///           └── (mealPeriod, items sorted A→Z)
+    ///           └── (mealPeriod, items sorted A->Z, deduped by name)
     private var grouped: [(hall: String, hallID: String, periods: [(period: String, items: [DailyMenuItem])])] {
         let byHall = Dictionary(grouping: items, by: \.dining_hall_id)
 
@@ -73,13 +87,13 @@ struct MenuBrowsingView: View {
                 let byPeriod = Dictionary(grouping: hallItems, by: \.meal_period)
                 let sortedPeriods = byPeriod
                     .map { period, periodItems in
-                        (
-                            period: period,
-                            items: periodItems.sorted { $0.food_item < $1.food_item }
-                        )
+                        var seen = Set<String>()
+                        let deduped = periodItems
+                            .sorted { $0.food_item < $1.food_item }
+                            .filter { seen.insert($0.food_item).inserted }
+                        return (period: period, items: deduped)
                     }
                     .sorted { a, b in
-                        // Sort by the canonical meal-period order defined above.
                         let ai = mealPeriodOrder.firstIndex(of: a.period) ?? 99
                         let bi = mealPeriodOrder.firstIndex(of: b.period) ?? 99
                         return ai < bi
@@ -87,7 +101,7 @@ struct MenuBrowsingView: View {
 
                 return (hall: hallName, hallID: hallID, periods: sortedPeriods)
             }
-            .sorted { $0.hall < $1.hall }  // Halls A → Z
+            .sorted { $0.hall < $1.hall }
     }
 
     // MARK: Body
@@ -149,8 +163,8 @@ struct MenuBrowsingView: View {
                         ForEach(periodGroup.items) { item in
                             MenuItemRow(
                                 item: item,
-                                isFavorited: favoritedIDs.contains(item.id),
-                                onFavorite: { await saveFavorite(item) }
+                                isFavorited: favoritedFoods.contains(item.food_item),
+                                onFavorite: { await toggleFavorite(item) }
                             )
                         }
                     }
@@ -171,6 +185,8 @@ struct MenuBrowsingView: View {
         isLoading = true
         errorMessage = nil
 
+        await registerDevice()
+
         do {
             let response: [DailyMenuItem] = try await SupabaseManager.client
                 .from("daily_menus")
@@ -184,15 +200,59 @@ struct MenuBrowsingView: View {
             errorMessage = error.localizedDescription
         }
 
+        await loadFavorites()
+
         isLoading = false
+    }
+
+    // MARK: Device registration
+
+    /// Upserts this device into the users table so the FK constraint is
+    /// satisfied before any favorites insert is attempted.
+    private func registerDevice() async {
+        do {
+            try await SupabaseManager.client
+                .from("users")
+                .upsert(UserUpsert(id: DeviceID.current))
+                .execute()
+        } catch {
+            print("[BearBites] Device registration failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: Favorites loading
+
+    /// Fetches the user's saved favorites from Supabase and populates
+    /// favoritedFoods so hearts are restored after an app relaunch.
+    private func loadFavorites() async {
+        do {
+            let rows: [FavoriteRow] = try await SupabaseManager.client
+                .from("favorites")
+                .select("food_item, dining_hall_id")
+                .eq("user_id", value: DeviceID.current.uuidString)
+                .execute()
+                .value
+
+            favoritedFoods = Set(rows.map(\.food_item))
+        } catch {
+            print("[BearBites] Failed to load favorites: \(error.localizedDescription)")
+        }
     }
 
     // MARK: Favoriting
 
+    /// Toggles the heart on an item: favorites it if not yet saved, removes
+    /// the favorite if it was already saved.
+    private func toggleFavorite(_ item: DailyMenuItem) async {
+        if favoritedFoods.contains(item.food_item) {
+            await removeFavorite(item)
+        } else {
+            await saveFavorite(item)
+        }
+    }
+
     private func saveFavorite(_ item: DailyMenuItem) async {
-        // Optimistic UI update — fill the heart before the network call so
-        // the response feels instant.
-        favoritedIDs.insert(item.id)
+        favoritedFoods.insert(item.food_item)
 
         let row = FavoriteInsert(
             user_id: DeviceID.current,
@@ -203,15 +263,34 @@ struct MenuBrowsingView: View {
         do {
             try await SupabaseManager.client
                 .from("favorites")
-                .insert(row)
+                .upsert(row, onConflict: "user_id,food_item,dining_hall_id")
                 .execute()
 
-            print("[BearBites] ♥ Favorited \"\(item.food_item)\" at \(item.dining_hall_id)")
+            print("[BearBites] Favorited \"\(item.food_item)\" at \(item.dining_hall_id)")
 
         } catch {
-            // Roll back the optimistic update so the UI stays accurate.
-            favoritedIDs.remove(item.id)
+            favoritedFoods.remove(item.food_item)
             print("[BearBites] Failed to save favorite: \(error.localizedDescription)")
+        }
+    }
+
+    private func removeFavorite(_ item: DailyMenuItem) async {
+        favoritedFoods.remove(item.food_item)
+
+        do {
+            try await SupabaseManager.client
+                .from("favorites")
+                .delete()
+                .eq("user_id", value: DeviceID.current.uuidString)
+                .eq("food_item", value: item.food_item)
+                .eq("dining_hall_id", value: item.dining_hall_id)
+                .execute()
+
+            print("[BearBites] Unfavorited \"\(item.food_item)\" at \(item.dining_hall_id)")
+
+        } catch {
+            favoritedFoods.insert(item.food_item)
+            print("[BearBites] Failed to remove favorite: \(error.localizedDescription)")
         }
     }
 }

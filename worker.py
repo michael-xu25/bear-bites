@@ -8,16 +8,22 @@ Google Cloud Scheduler). Execution order:
   2. Parse every recipe item being served *today* across all dining halls.
   3. Sync today's menu into the Supabase daily_menus table so the iOS app
      can read it without ever hitting the Brown API directly.
-  4. Load all user favorites from Supabase (uses service_role key → bypasses RLS).
+  4. Load all user favorites from Supabase (uses service_role key -> bypasses RLS).
   5. Cross-reference favorites against today's menu with hall-scoping logic.
-  6. Print a match log. (Real APNs dispatch replaces the print() calls in Phase 4.)
+  6. Send APNs push notifications for each match.
 
 Required environment variables:
-  SUPABASE_URL   — your project URL, e.g. https://xyzxyz.supabase.co
-  SUPABASE_KEY   — the *service_role* secret key (never the anon key).
+  SUPABASE_URL   -- your project URL, e.g. https://xyzxyz.supabase.co
+  SUPABASE_KEY   -- the *service_role* secret key (never the anon key).
                    The service_role key bypasses Row Level Security so the
                    worker can read every user's favorites and APN tokens,
                    and write to daily_menus.
+
+APNs environment variables (all four required for real notifications):
+  APNS_KEY_ID      -- 10-char Key ID from Apple Developer portal
+  APNS_TEAM_ID     -- 10-char Team ID from Apple Developer portal
+  APNS_BUNDLE_ID   -- app bundle ID, e.g. Bricked-Labs.Bear-Bites
+  APNS_PRIVATE_KEY -- full contents of the .p8 file (including header/footer)
 
 Optional (for local dev):
   Place a .env file in the same directory and install python-dotenv.
@@ -26,6 +32,7 @@ Optional (for local dev):
 
 import logging
 import os
+import time
 from collections import defaultdict
 from datetime import date
 
@@ -39,6 +46,8 @@ try:
 except ImportError:
     pass
 
+import httpx
+import jwt as pyjwt  # PyJWT — pip install PyJWT
 from supabase import Client, create_client
 
 # ---------------------------------------------------------------------------
@@ -365,22 +374,45 @@ def find_matches(favorites: list[dict], menu_index: dict) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def log_matches(matches: list[dict]) -> None:
+def _build_apns_jwt(key_id: str, team_id: str, private_key_pem: str) -> str:
     """
-    Deduplicate and print a structured match log.
+    Build a short-lived ES256 JWT for APNs token-based authentication.
+    Valid for 1 hour (APNs rejects tokens older than 60 minutes).
+    """
+    payload = {
+        "iss": team_id,
+        "iat": int(time.time()),
+    }
+    headers = {
+        "alg": "ES256",
+        "kid": key_id,
+    }
+    return pyjwt.encode(payload, private_key_pem, algorithm="ES256", headers=headers)
+
+
+def send_notifications(
+    matches: list[dict],
+    key_id: str,
+    team_id: str,
+    bundle_id: str,
+    private_key_pem: str,
+    dispatch_enabled: bool = True,
+) -> None:
+    """
+    Deduplicate matches and send one APNs push notification per unique match.
 
     Deduplication key: (user_id, food_item, location_id, meal_period).
     This prevents double-firing when the same dish appears at two stations
     during the same meal period.
 
-    In Phase 4 each `print()` line is replaced by an HTTP call to the
-    APNs provider API or FCM batch endpoint.
+    Matches with no APNs token are logged as warnings and skipped — those
+    devices haven't granted notification permission yet.
     """
     if not matches:
         log.info("No matches found for today (%s). No notifications to send.", TODAY)
         return
 
-    # Deduplicate before counting/printing.
+    # Deduplicate.
     seen: set[tuple] = set()
     unique: list[dict] = []
     for m in matches:
@@ -391,23 +423,95 @@ def log_matches(matches: list[dict]) -> None:
 
     log.info("Total unique match(es) to notify: %d", len(unique))
 
+    # Log the match summary regardless of whether tokens are available.
     separator = "=" * 72
     print()
     print(separator)
     print(f"  BEARBITES MATCH LOG — {TODAY}")
     print(separator)
-
     for m in unique:
         token_display = m["apn_token"] if m["apn_token"] else "(no APN token yet)"
         print(
-            f"  MATCH FOUND: Send APN to [{token_display}] "
+            f"  MATCH FOUND: [{token_display}] "
             f"for [{m['food_item']}] "
             f"at [{m['location_name']} ({m['location_id']})] "
             f"— {m['meal_period']}"
         )
-
     print(separator)
     print()
+
+    if not dispatch_enabled:
+        log.info("APNs dispatch disabled — match log printed above, no notifications sent.")
+        return
+
+    # Build JWT once — reused for all notifications in this run.
+    token = _build_apns_jwt(key_id, team_id, private_key_pem)
+
+    sent = 0
+    skipped = 0
+    failed = 0
+
+    # httpx client with HTTP/2 enabled — APNs requires HTTP/2.
+    with httpx.Client(http2=True) as client:
+        for m in unique:
+            apn_token = m.get("apn_token")
+            if not apn_token:
+                log.warning(
+                    "No APNs token for user %s — skipping \"%s\".",
+                    m["user_id"],
+                    m["food_item"],
+                )
+                skipped += 1
+                continue
+
+            url = f"https://api.push.apple.com/3/device/{apn_token}"
+            headers = {
+                "authorization": f"bearer {token}",
+                "apns-topic": bundle_id,
+                "apns-push-type": "alert",
+                "apns-priority": "10",
+            }
+            payload = {
+                "aps": {
+                    "alert": {
+                        "title": f"{m['food_item']} is on the menu!",
+                        "body": (
+                            f"{m['location_name']} is serving it for "
+                            f"{m['meal_period'].lower()} today."
+                        ),
+                    },
+                    "sound": "default",
+                }
+            }
+
+            try:
+                resp = client.post(url, json=payload, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    log.info(
+                        "Notification sent: \"%s\" -> %s...  [%s]",
+                        m["food_item"],
+                        apn_token[:8],
+                        m["meal_period"],
+                    )
+                    sent += 1
+                else:
+                    log.error(
+                        "APNs rejected notification for token %s...: %s %s",
+                        apn_token[:8],
+                        resp.status_code,
+                        resp.text,
+                    )
+                    failed += 1
+            except httpx.RequestError as exc:
+                log.error("Network error sending APNs notification: %s", exc)
+                failed += 1
+
+    log.info(
+        "Notification summary: %d sent, %d skipped (no token), %d failed.",
+        sent,
+        skipped,
+        failed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +558,29 @@ def main() -> None:
     # ── 5. Cross-reference ───────────────────────────────────────────────────
     matches = find_matches(favorites, menu_index)
 
-    # ── 6. Print match log (replace with APNs dispatch in Phase 4) ───────────
-    log_matches(matches)
+    # ── 6. Send APNs notifications ────────────────────────────────────────────
+    apns_key_id      = os.environ.get("APNS_KEY_ID", "").strip()
+    apns_team_id     = os.environ.get("APNS_TEAM_ID", "").strip()
+    apns_bundle_id   = os.environ.get("APNS_BUNDLE_ID", "").strip()
+    apns_private_key = os.environ.get("APNS_PRIVATE_KEY", "").strip()
+
+    apns_configured = all([apns_key_id, apns_team_id, apns_bundle_id, apns_private_key])
+
+    if not apns_configured:
+        log.warning(
+            "APNs env vars not fully set (APNS_KEY_ID, APNS_TEAM_ID, "
+            "APNS_BUNDLE_ID, APNS_PRIVATE_KEY). Logging matches only — "
+            "no notifications will be sent."
+        )
+
+    send_notifications(
+        matches,
+        key_id=apns_key_id,
+        team_id=apns_team_id,
+        bundle_id=apns_bundle_id,
+        private_key_pem=apns_private_key,
+        dispatch_enabled=apns_configured,
+    )
 
     log.info("Worker finished successfully.")
 
