@@ -36,7 +36,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -241,21 +241,26 @@ def sync_daily_menu(sb: Client, entries: list[dict], today: str = TODAY) -> None
     iOS app can query Supabase instead of hitting the Brown Dining API directly.
 
     Two-phase approach:
-      1. DELETE rows whose date is strictly before today, keeping the table
-         lean (one day of data is all the iOS app ever needs).
+      1. DELETE rows older than 7 days, keeping a rolling week of data.
+         The iOS Discover tab reads from this 7-day window to build a
+         searchable catalog of all items users can favorite.
       2. INSERT today's rows in batches of _BATCH_SIZE, using
          ON CONFLICT DO NOTHING so re-running the worker mid-day is safe.
     """
-    # ── Phase 1: prune stale rows ────────────────────────────────────────────
+    # ── Phase 1: prune rows older than 7 days ────────────────────────────────
+    seven_days_ago = (
+        datetime.now(ZoneInfo("America/New_York")) - timedelta(days=7)
+    ).date().isoformat()
+
     prune_resp = (
         sb.table("daily_menus")
         .delete()
-        .lt("date", today)   # strictly less than today → removes yesterday and older
+        .lt("date", seven_days_ago)
         .execute()
     )
     pruned = len(prune_resp.data) if prune_resp.data else 0
     if pruned:
-        log.info("Pruned %d stale daily_menus row(s) from before %s.", pruned, today)
+        log.info("Pruned %d stale daily_menus row(s) from before %s.", pruned, seven_days_ago)
 
     if not entries:
         log.warning("No menu entries to sync for today (%s).", today)

@@ -32,6 +32,7 @@ BearBites is an iOS app that sends Brown University students a push notification
 | `SupabaseManager.swift` | Done | Shared Supabase client + persistent `DeviceID` |
 | `MenuBrowsingView.swift` | Done | Fetches menu from Supabase, grouped by hall + meal period, heart-to-favorite |
 | `AddFavoriteView.swift` | Done | Type a food name and save it directly to `favorites` |
+| `ItemCatalogView.swift` | Done | Searchable catalog of all menu items seen in the past 7 days — browse by hall, search, heart to favorite, or add custom items via sheet |
 | `ContentView.swift` | Done | TabView with Menu tab and Add Favorite tab |
 
 ### What is NOT yet built
@@ -48,6 +49,8 @@ BearBites is an iOS app that sends Brown University students a push notification
 - **Heart persistence:** Tapping a heart now reliably saves to Supabase and survives app relaunches. Fixed two stacked bugs: (1) `MenuBrowsingView` was not calling `registerDevice()` before inserting into `favorites`, causing a silent FK violation; (2) heart state was keyed to daily_menus row UUIDs (which change daily) instead of food item names. Hearts now restore correctly on every launch via `loadFavorites()`. Tapping a hearted item a second time un-favorites it.
 - **Push notifications end-to-end:** Real APNs notifications are live and tested. The iOS app requests permission on launch, receives the device token, and uploads it to `users.apn_token`. The worker builds an ES256 JWT from the `.p8` key and POSTs to APNs via HTTP/2 (`httpx`) for each match. Uses the sandbox endpoint for Xcode dev builds (`APNS_SANDBOX=true`, the default) and the production endpoint for App Store/TestFlight (`APNS_SANDBOX=false`).
 - **Timezone fix:** Worker now uses US/Eastern time (`America/New_York`) instead of the system/UTC clock so the date always matches the Brown campus and the iOS app.
+- **Timed notifications:** Worker now runs 3 additional times per day via GitHub Actions (7:25 AM, 10:55 AM, 4:55 PM EDT) and only dispatches notifications for the meal period starting within the next 20 minutes. The 2 AM run syncs the menu only.
+- **Discover catalog:** `daily_menus` now keeps a rolling 7-day window (was pruned to today only). A new Discover tab shows a searchable, hall-grouped catalog of all unique menu items seen over the past week. Users can heart items directly from the catalog or use "Add custom" for items not yet in the DB. The catalog fills up over the first 7 days of use.
 
 ---
 
@@ -266,6 +269,9 @@ Replace `DeviceID` (UserDefaults UUID) with `supabase.auth.signInAnonymously()`.
 
 ### Optional account sign-in (Google / Sign in with Apple)
 Give users the option to link their anonymous device account to a Google or Apple ID so their favorites sync across devices. Device-local favorites remain the default — sign-in is never required. When a user signs in, migrate their existing device favorites to the authenticated account.
+
+### Recommendations (suggested favorites)
+Show a curated "Start here" section at the top of the Discover tab with crowd-sourced popular dishes — e.g. Yakisoba Noodle, Ivy Room Big Burger, Egg Fried Rice, Bulgogi Chicken, Dry Noodle, Friday V-Dub Lunch Fried Chicken, Cheesecake. New users can set up meaningful favorites in seconds without needing to know exact menu item names. Tapping a suggestion hearts it just like browsing the catalog normally.
 
 ### Then: Push Notifications
 1. Request APNs permission on app launch

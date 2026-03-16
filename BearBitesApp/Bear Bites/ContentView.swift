@@ -13,9 +13,9 @@ struct ContentView: View {
                     Label("Favorites", systemImage: "heart.fill")
                 }
 
-            AddFavoriteView()
+            ItemCatalogView()
                 .tabItem {
-                    Label("Add Favorite", systemImage: "plus.circle")
+                    Label("Discover", systemImage: "magnifyingglass")
                 }
         }
     }
