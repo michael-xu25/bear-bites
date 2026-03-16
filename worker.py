@@ -398,6 +398,7 @@ def send_notifications(
     bundle_id: str,
     private_key_pem: str,
     dispatch_enabled: bool = True,
+    sandbox: bool = True,
 ) -> None:
     """
     Deduplicate matches and send one APNs push notification per unique match.
@@ -448,6 +449,9 @@ def send_notifications(
     # Build JWT once — reused for all notifications in this run.
     token = _build_apns_jwt(key_id, team_id, private_key_pem)
 
+    apns_host = "api.sandbox.push.apple.com" if sandbox else "api.push.apple.com"
+    log.info("APNs host: %s", apns_host)
+
     sent = 0
     skipped = 0
     failed = 0
@@ -465,7 +469,7 @@ def send_notifications(
                 skipped += 1
                 continue
 
-            url = f"https://api.push.apple.com/3/device/{apn_token}"
+            url = f"https://{apns_host}/3/device/{apn_token}"
             headers = {
                 "authorization": f"bearer {token}",
                 "apns-topic": bundle_id,
@@ -564,6 +568,13 @@ def main() -> None:
     apns_team_id     = os.environ.get("APNS_TEAM_ID", "").strip()
     apns_bundle_id   = os.environ.get("APNS_BUNDLE_ID", "").strip()
     apns_private_key = os.environ.get("APNS_PRIVATE_KEY", "").strip()
+    # APNS_SANDBOX=true  → api.sandbox.push.apple.com  (Xcode dev builds)
+    # APNS_SANDBOX=false → api.push.apple.com          (App Store / TestFlight)
+    apns_sandbox     = os.environ.get("APNS_SANDBOX", "true").strip().lower() == "true"
+
+    # GitHub Actions passes multiline secrets with real newlines; .env files
+    # store them as literal \n. Normalise both to real newlines here.
+    apns_private_key = apns_private_key.replace("\\n", "\n")
 
     apns_configured = all([apns_key_id, apns_team_id, apns_bundle_id, apns_private_key])
 
@@ -581,6 +592,7 @@ def main() -> None:
         bundle_id=apns_bundle_id,
         private_key_pem=apns_private_key,
         dispatch_enabled=apns_configured,
+        sandbox=apns_sandbox,
     )
 
     log.info("Worker finished successfully.")
