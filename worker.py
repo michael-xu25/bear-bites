@@ -607,11 +607,33 @@ def main() -> None:
     matches = find_matches(favorites, menu_index)
 
     # ── 6. Filter matches to the upcoming meal period ─────────────────────────
-    meal_period = get_upcoming_meal_period()
+    # FORCE_NOTIFY=true is set by cron-job.org triggers, which fire at exact
+    # meal times. In that case skip the time-window check and use whichever
+    # meal period is closest to now instead of requiring it to be within the
+    # narrow window (which could fail if GitHub job startup adds latency).
+    force_notify = os.environ.get("FORCE_NOTIFY", "").strip().lower() == "true"
+
+    if force_notify:
+        # Find the nearest meal period by absolute time distance.
+        now = datetime.now(ZoneInfo("America/New_York"))
+        def _minutes_away(period_name: str) -> float:
+            h, m = MEAL_START_TIMES_ET[period_name]
+            start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            return abs((start - now).total_seconds() / 60)
+        meal_period = min(MEAL_START_TIMES_ET, key=_minutes_away)
+        log.info(
+            "FORCE_NOTIFY=true — nearest meal period: %s. "
+            "Sending notifications for %d match(es).",
+            meal_period,
+            len([m for m in matches if m["meal_period"] == meal_period]),
+        )
+    else:
+        meal_period = get_upcoming_meal_period()
+
     if meal_period:
         matches = [m for m in matches if m["meal_period"] == meal_period]
         log.info(
-            "Upcoming meal: %s. Filtered to %d match(es) for notification.",
+            "Meal period: %s. Filtered to %d match(es) for notification.",
             meal_period,
             len(matches),
         )
