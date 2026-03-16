@@ -112,16 +112,18 @@ struct FavoritesView: View {
 
         for item in toDelete {
             do {
-                try await SupabaseManager.client
-                    .from("favorites")
-                    .delete()
-                    .eq("id", value: item.id.uuidString)
-                    .execute()
+                try await SupabaseManager.withRetry {
+                    try await SupabaseManager.client
+                        .from("favorites")
+                        .delete()
+                        .eq("id", value: item.id.uuidString)
+                        .execute()
+                }
             } catch {
                 // Re-insert on failure so the UI stays accurate.
                 favorites.append(item)
                 favorites.sort { $0.food_item < $1.food_item }
-                print("[BearBites] Failed to delete favorite: \(error.localizedDescription)")
+                print("[BearBites] Failed to delete favorite after retries: \(error.localizedDescription)")
             }
         }
     }

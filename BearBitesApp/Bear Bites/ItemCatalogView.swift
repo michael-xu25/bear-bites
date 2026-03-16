@@ -225,14 +225,16 @@ struct ItemCatalogView: View {
         )
 
         do {
-            try await SupabaseManager.client
-                .from("favorites")
-                .upsert(row, onConflict: "user_id,food_item,dining_hall_id")
-                .execute()
+            try await SupabaseManager.withRetry {
+                try await SupabaseManager.client
+                    .from("favorites")
+                    .upsert(row, onConflict: "user_id,food_item,dining_hall_id")
+                    .execute()
+            }
             print("[BearBites] Catalog: favorited \"\(item.food_item)\"")
         } catch {
             favoritedFoods.remove(item.food_item)
-            print("[BearBites] Catalog: failed to save favorite: \(error.localizedDescription)")
+            print("[BearBites] Catalog: failed to save favorite after retries: \(error.localizedDescription)")
         }
     }
 
@@ -240,17 +242,19 @@ struct ItemCatalogView: View {
         favoritedFoods.remove(item.food_item)
 
         do {
-            try await SupabaseManager.client
-                .from("favorites")
-                .delete()
-                .eq("user_id", value: DeviceID.current.uuidString)
-                .eq("food_item", value: item.food_item)
-                .eq("dining_hall_id", value: item.dining_hall_id)
-                .execute()
+            try await SupabaseManager.withRetry {
+                try await SupabaseManager.client
+                    .from("favorites")
+                    .delete()
+                    .eq("user_id", value: DeviceID.current.uuidString)
+                    .eq("food_item", value: item.food_item)
+                    .eq("dining_hall_id", value: item.dining_hall_id)
+                    .execute()
+            }
             print("[BearBites] Catalog: unfavorited \"\(item.food_item)\"")
         } catch {
             favoritedFoods.insert(item.food_item)
-            print("[BearBites] Catalog: failed to remove favorite: \(error.localizedDescription)")
+            print("[BearBites] Catalog: failed to remove favorite after retries: \(error.localizedDescription)")
         }
     }
 }
