@@ -28,7 +28,7 @@ BearBites is an iOS app that sends Brown University students a push notification
 | Component | Status | Description |
 |---|---|---|
 | Supabase database | Done | 3 tables: `users`, `favorites`, `daily_menus` |
-| `worker.py` | Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites |
+| `worker.py` | Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites, sends APNs push notifications |
 | `SupabaseManager.swift` | Done | Shared Supabase client + persistent `DeviceID` |
 | `MenuBrowsingView.swift` | Done | Fetches menu from Supabase, grouped by hall + meal period, heart-to-favorite |
 | `AddFavoriteView.swift` | Done | Type a food name and save it directly to `favorites` |
@@ -37,15 +37,17 @@ BearBites is an iOS app that sends Brown University students a push notification
 ### What is NOT yet built
 
 - Favorites list view (see saved favorites, delete them)
-- Real push notification dispatch (worker prints matches but doesn't send APNs)
+- Real push notification dispatch (working — see Recently fixed)
 - Supabase Auth (currently using a `DeviceID` UUID stored in `UserDefaults`)
 - APNs token registration
 - Search, allergen filters, settings
 
-### Recently fixed
+### Recently fixed / shipped
 
 - **Duplicate menu items:** The same dish appearing at multiple stations within a meal period now shows only once in the list (deduplicated by food name in the `grouped` computed property).
 - **Heart persistence:** Tapping a heart now reliably saves to Supabase and survives app relaunches. Fixed two stacked bugs: (1) `MenuBrowsingView` was not calling `registerDevice()` before inserting into `favorites`, causing a silent FK violation; (2) heart state was keyed to daily_menus row UUIDs (which change daily) instead of food item names. Hearts now restore correctly on every launch via `loadFavorites()`. Tapping a hearted item a second time un-favorites it.
+- **Push notifications end-to-end:** Real APNs notifications are live and tested. The iOS app requests permission on launch, receives the device token, and uploads it to `users.apn_token`. The worker builds an ES256 JWT from the `.p8` key and POSTs to APNs via HTTP/2 (`httpx`) for each match. Uses the sandbox endpoint for Xcode dev builds (`APNS_SANDBOX=true`, the default) and the production endpoint for App Store/TestFlight (`APNS_SANDBOX=false`).
+- **Timezone fix:** Worker now uses US/Eastern time (`America/New_York`) instead of the system/UTC clock so the date always matches the Brown campus and the iOS app.
 
 ---
 
