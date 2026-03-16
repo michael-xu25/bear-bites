@@ -30,6 +30,8 @@ Optional (for local dev):
   The script calls load_dotenv() before reading os.environ.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import time
@@ -73,6 +75,42 @@ DINING_API_URL = "https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/
 # GitHub Actions UTC, etc.) — Brown Dining is on the Brown campus and the
 # iOS app uses the device's local Eastern date for its Supabase query.
 TODAY: str = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+# ---------------------------------------------------------------------------
+# Meal timing
+# ---------------------------------------------------------------------------
+
+# Approximate Brown Dining meal start times (US/Eastern).
+# The Brown Dining API does not include schedule times, so these are
+# hardcoded based on typical hall hours.
+MEAL_START_TIMES_ET: dict[str, tuple[int, int]] = {
+    "Breakfast": (7, 30),
+    "Lunch":     (11, 0),
+    "Dinner":    (17, 0),
+}
+
+# Notification window: send if the meal starts within this many minutes.
+# The meal-time cron triggers fire ~5 min before each meal; the window
+# is wider to absorb GitHub Actions scheduling jitter.
+_NOTIFY_WINDOW_MINUTES = 20
+
+
+def get_upcoming_meal_period() -> str | None:
+    """
+    Return the meal period name whose start time is within the next
+    _NOTIFY_WINDOW_MINUTES minutes (or up to 5 minutes past), or None
+    if no meal is starting soon.
+
+    Used to decide whether to dispatch notifications and which meal to
+    filter matches to.  Returns None during the 2 AM menu-sync run.
+    """
+    now = datetime.now(ZoneInfo("America/New_York"))
+    for period, (h, m) in MEAL_START_TIMES_ET.items():
+        start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        delta_minutes = (start - now).total_seconds() / 60
+        if -5 <= delta_minutes <= _NOTIFY_WINDOW_MINUTES:
+            return period
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +601,23 @@ def main() -> None:
     # ── 5. Cross-reference ───────────────────────────────────────────────────
     matches = find_matches(favorites, menu_index)
 
-    # ── 6. Send APNs notifications ────────────────────────────────────────────
+    # ── 6. Filter matches to the upcoming meal period ─────────────────────────
+    meal_period = get_upcoming_meal_period()
+    if meal_period:
+        matches = [m for m in matches if m["meal_period"] == meal_period]
+        log.info(
+            "Upcoming meal: %s. Filtered to %d match(es) for notification.",
+            meal_period,
+            len(matches),
+        )
+    else:
+        log.info(
+            "No meal period starting soon — menu synced, notifications skipped."
+        )
+        log.info("Worker finished successfully.")
+        return
+
+    # ── 7. Send APNs notifications ────────────────────────────────────────────
     apns_key_id      = os.environ.get("APNS_KEY_ID", "").strip()
     apns_team_id     = os.environ.get("APNS_TEAM_ID", "").strip()
     apns_bundle_id   = os.environ.get("APNS_BUNDLE_ID", "").strip()

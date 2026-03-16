@@ -8,6 +8,11 @@ struct ContentView: View {
                     Label("Menu", systemImage: "fork.knife")
                 }
 
+            FavoritesView()
+                .tabItem {
+                    Label("Favorites", systemImage: "heart.fill")
+                }
+
             AddFavoriteView()
                 .tabItem {
                     Label("Add Favorite", systemImage: "plus.circle")
