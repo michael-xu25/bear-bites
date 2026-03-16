@@ -34,7 +34,8 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -67,11 +68,11 @@ log = logging.getLogger(__name__)
 
 DINING_API_URL = "https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus"
 
-# ISO date string for today in local time, e.g. "2026-03-03".
-# The Brown Dining API keys its meal data by date, so this must match the
-# server timezone.  The worker should be deployed in the US/Eastern timezone
-# or the date should be passed in explicitly for correctness.
-TODAY: str = date.today().isoformat()
+# ISO date string for today in US/Eastern time, e.g. "2026-03-03".
+# Always use Eastern time regardless of where the worker runs (local Mac,
+# GitHub Actions UTC, etc.) — Brown Dining is on the Brown campus and the
+# iOS app uses the device's local Eastern date for its Supabase query.
+TODAY: str = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 
 
 # ---------------------------------------------------------------------------
