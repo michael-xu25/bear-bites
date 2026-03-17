@@ -13,11 +13,13 @@ BearBites is an iOS app that sends Brown University students a push notification
 4. [System Architecture](#system-architecture)
 5. [Database Schema](#database-schema)
 6. [Running the Worker](#running-the-worker)
-7. [Xcode Guide](#xcode-guide)
-8. [Agent Notes: Editing Files](#agent-notes-editing-files)
-9. [Remaining Roadmap](#remaining-roadmap)
-10. [Dining Hall Reference](#dining-hall-reference)
-11. [Brown Dining API Reference](#brown-dining-api-reference)
+7. [Scheduling (cron-job.org + GitHub Actions)](#scheduling)
+8. [Xcode Guide](#xcode-guide)
+9. [Agent Notes: Supabase Quick Reference](#agent-notes-supabase-quick-reference)
+10. [Agent Notes: Editing Files](#agent-notes-editing-files)
+11. [Remaining Roadmap](#remaining-roadmap)
+12. [Dining Hall Reference](#dining-hall-reference)
+13. [Brown Dining API Reference](#brown-dining-api-reference)
 
 ---
 
@@ -27,30 +29,35 @@ BearBites is an iOS app that sends Brown University students a push notification
 
 | Component | Status | Description |
 |---|---|---|
-| Supabase database | Done | 3 tables: `users`, `favorites`, `daily_menus` |
-| `worker.py` | Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites, sends APNs push notifications |
-| `SupabaseManager.swift` | Done | Shared Supabase client + persistent `DeviceID` |
-| `MenuBrowsingView.swift` | Done | Fetches menu from Supabase, grouped by hall + meal period, heart-to-favorite |
-| `AddFavoriteView.swift` | Done | Type a food name and save it directly to `favorites` |
-| `ItemCatalogView.swift` | Done | Searchable catalog of all menu items seen in the past 7 days — browse by hall, search, heart to favorite, or add custom items via sheet |
-| `ContentView.swift` | Done | TabView with Menu tab and Add Favorite tab |
+| Supabase database | ✅ Done | 3 tables: `users`, `favorites`, `daily_menus` |
+| `worker.py` | ✅ Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites, sends APNs push notifications |
+| GitHub Actions + cron-job.org | ✅ Done | Worker runs automatically: 2 AM ET for menu sync, and via cron-job.org at 7:25 AM / 10:55 AM / 4:55 PM ET for meal-time notifications |
+| APNs push notifications | ✅ Done | End-to-end: iOS app registers device token → uploaded to `users.apn_token` → worker sends ES256-signed HTTP/2 pushes via `api.sandbox.push.apple.com` |
+| `SupabaseManager.swift` | ✅ Done | Shared Supabase client + `DeviceID` + `withRetry()` helper for transient network errors |
+| `MenuBrowsingView.swift` | ✅ Done | Fetches today's menu from Supabase, grouped by hall + meal period, heart-to-favorite with persistence |
+| `FavoritesView.swift` | ✅ Done | List of all saved favorites, swipe-to-delete |
+| `ItemCatalogView.swift` | ✅ Done | Searchable catalog of all menu items seen in the past 7 days — browse by hall, search, heart to favorite, or add custom items via sheet |
+| `AddFavoriteView.swift` | ✅ Done | Manual type-a-name favoriting (accessible as sheet from Discover tab) |
+| `ContentView.swift` | ✅ Done | TabView with 3 tabs: Menu, Favorites, Discover |
+| App icon | ✅ Done | Bear eating pizza, centered, saved to `design/app-icon-final-1024x1024.png` |
 
 ### What is NOT yet built
 
-- Favorites list view (see saved favorites, delete them)
-- Real push notification dispatch (working — see Recently fixed)
-- Supabase Auth (currently using a `DeviceID` UUID stored in `UserDefaults`)
-- APNs token registration
+- Supabase Auth (currently using a `DeviceID` UUID stored in `UserDefaults` — planned replacement with `supabase.auth.signInAnonymously()`)
 - Search, allergen filters, settings
+- Home screen widget
+- TestFlight → App Store distribution
 
 ### Recently fixed / shipped
 
-- **Duplicate menu items:** The same dish appearing at multiple stations within a meal period now shows only once in the list (deduplicated by food name in the `grouped` computed property).
-- **Heart persistence:** Tapping a heart now reliably saves to Supabase and survives app relaunches. Fixed two stacked bugs: (1) `MenuBrowsingView` was not calling `registerDevice()` before inserting into `favorites`, causing a silent FK violation; (2) heart state was keyed to daily_menus row UUIDs (which change daily) instead of food item names. Hearts now restore correctly on every launch via `loadFavorites()`. Tapping a hearted item a second time un-favorites it.
-- **Push notifications end-to-end:** Real APNs notifications are live and tested. The iOS app requests permission on launch, receives the device token, and uploads it to `users.apn_token`. The worker builds an ES256 JWT from the `.p8` key and POSTs to APNs via HTTP/2 (`httpx`) for each match. Uses the sandbox endpoint for Xcode dev builds (`APNS_SANDBOX=true`, the default) and the production endpoint for App Store/TestFlight (`APNS_SANDBOX=false`).
-- **Timezone fix:** Worker now uses US/Eastern time (`America/New_York`) instead of the system/UTC clock so the date always matches the Brown campus and the iOS app.
-- **Timed notifications:** Worker now runs 3 additional times per day via GitHub Actions (7:25 AM, 10:55 AM, 4:55 PM EDT) and only dispatches notifications for the meal period starting within the next 20 minutes. The 2 AM run syncs the menu only.
-- **Discover catalog:** `daily_menus` now keeps a rolling 7-day window (was pruned to today only). A new Discover tab shows a searchable, hall-grouped catalog of all unique menu items seen over the past week. Users can heart items directly from the catalog or use "Add custom" for items not yet in the DB. The catalog fills up over the first 7 days of use.
+- **Reliable scheduling:** Replaced unreliable GitHub Actions cron triggers with cron-job.org, which POSTs to the GitHub `workflow_dispatch` API at exact meal times. The 2 AM menu sync stays on GitHub Actions (timing not critical). Meal-time notification runs use `FORCE_NOTIFY=true` to bypass the time-window check in the worker.
+- **Network resilience:** `SupabaseManager` now configures the URLSession with `waitsForConnectivity = true` (absorbs brief cellular dropouts before they become errors) and provides `withRetry()` — up to 3 attempts with 1 s / 2 s / 3 s backoff on transient `NSURLErrorDomain` codes. All favorite save/remove calls use this.
+- **Duplicate menu items:** The same dish appearing at multiple stations within a meal period now shows only once in the list (deduplicated by food name in `MenuBrowsingView.grouped`).
+- **Heart persistence:** Hearts now save to Supabase, survive app relaunches, and can be un-tapped. Fixed FK violation bug (missing `registerDevice()` call) and re-keyed state to food item name instead of volatile daily_menus row UUIDs.
+- **Push notifications end-to-end:** Real APNs notifications working. iOS app requests permission on launch, receives device token, uploads to `users.apn_token`. Worker signs ES256 JWT from `.p8` key and POSTs via HTTP/2 (`httpx`). `APNS_SANDBOX=true` (default) uses sandbox endpoint for Xcode dev builds; set `false` for App Store/TestFlight.
+- **Timezone fix:** Worker uses `America/New_York` (not system/UTC) so the date always matches Brown campus time.
+- **Timed notifications:** Worker detects the upcoming meal period and only dispatches notifications for it. The 2 AM sync run returns early without sending anything.
+- **Discover catalog:** `daily_menus` keeps a rolling 7-day window. Discover tab shows a searchable, hall-grouped catalog of all unique items seen this week.
 
 ---
 
@@ -59,10 +66,11 @@ BearBites is an iOS app that sends Brown University students a push notification
 | Layer | Technology |
 |---|---|
 | iOS Frontend | Swift / SwiftUI (Xcode 16) |
-| Push Notifications | Apple Push Notification service (APNs) — not yet wired |
-| Backend Worker | Python 3, runs daily via cron / GitHub Actions / Cloud Scheduler |
+| Push Notifications | Apple Push Notification service (APNs) — token-based auth (.p8), sandbox + production |
+| Backend Worker | Python 3.12, runs via GitHub Actions (triggered by cron-job.org) |
 | Database | Supabase (PostgreSQL) |
-| Auth | DeviceID via UserDefaults (real Supabase anonymous auth planned) |
+| Auth | DeviceID via UserDefaults (Supabase anonymous auth planned) |
+| Scheduling | cron-job.org → GitHub Actions `workflow_dispatch` for meal times; GitHub Actions `schedule` for 2 AM sync |
 | Source API | Brown Dining Services — `https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus` |
 
 ---
@@ -72,20 +80,29 @@ BearBites is an iOS app that sends Brown University students a push notification
 ```
 BearBites/
 ├── worker.py                        # Python backend worker
-├── requirements.txt                 # Python dependencies
+├── requirements.txt                 # Python dependencies (requests, supabase, httpx[http2], PyJWT, cryptography)
 ├── .env                             # Local env vars (never committed)
 ├── supabase_schema.sql              # users + favorites table DDL
 ├── add_daily_menus_table.sql        # daily_menus table DDL
+├── design/
+│   └── app-icon-final-1024x1024.png # Master copy of the app icon
+│
+├── .github/
+│   └── workflows/
+│       └── daily_worker.yml         # GitHub Actions: 2 AM sync + workflow_dispatch for notifications
 │
 └── BearBitesApp/
     └── Bear Bites/
-        ├── Bear_BitesApp.swift      # App entry point
-        ├── ContentView.swift        # TabView root
+        ├── Bear_BitesApp.swift      # App entry point + AppDelegate (APNs registration)
+        ├── ContentView.swift        # TabView root — Menu / Favorites / Discover
         ├── MenuBrowsingView.swift   # Browse today's menu, tap to favorite
-        ├── AddFavoriteView.swift    # Type a food name to add a favorite
+        ├── FavoritesView.swift      # List saved favorites, swipe to delete
+        ├── ItemCatalogView.swift    # Discover tab: 7-day catalog, search, heart, add custom
+        ├── AddFavoriteView.swift    # Manual type-a-name favoriting (sheet in Discover)
         ├── Assets.xcassets/
+        │   └── AppIcon.appiconset/  # 1024×1024 universal icon (Xcode generates all sizes)
         └── Services/
-            └── SupabaseManager.swift  # Supabase client + DeviceID
+            └── SupabaseManager.swift  # Supabase client + DeviceID + withRetry()
 ```
 
 ---
@@ -93,27 +110,34 @@ BearBites/
 ## System Architecture
 
 ```
-Brown Dining API (2.5 MB JSON, updated daily)
-        │
-        ▼ (once per day, run worker.py)
-┌─────────────────────────────────────────┐
-│           worker.py                     │
-│  1. Fetch Brown Dining API              │
-│  2. Parse today's recipes               │
-│  3. Sync → Supabase daily_menus table   │
-│  4. Load user favorites from Supabase   │
-│  5. Cross-reference favorites vs menu   │
-│  6. Print match log (APNs comes later)  │
-└─────────────────────────────────────────┘
+cron-job.org (7:25 AM / 10:55 AM / 4:55 PM ET)
+        │  POST to GitHub workflow_dispatch API
+        ▼
+┌─────────────────────────────────────────────────┐
+│           worker.py  (GitHub Actions)           │
+│                                                 │
+│  1. Fetch Brown Dining API (2.5 MB JSON)        │
+│  2. Parse today's recipes                       │
+│  3. Sync → Supabase daily_menus (7-day window)  │
+│  4. Load user favorites + APN tokens            │
+│  5. Cross-reference favorites vs today's menu   │
+│  6. Filter to upcoming meal period              │
+│  7. Send APNs push notifications (HTTP/2)       │
+└─────────────────────────────────────────────────┘
         │
         ▼
-┌─────────────────────┐      ┌──────────────────────────────┐
-│   Supabase DB       │      │       iOS App (SwiftUI)      │
-│                     │      │                              │
-│  users              │◄────►│  MenuBrowsingView            │
-│  favorites          │      │    reads daily_menus         │
-│  daily_menus        │      │    writes favorites          │
-└─────────────────────┘      └──────────────────────────────┘
+┌─────────────────────┐      ┌──────────────────────────────────┐
+│   Supabase DB       │      │         iOS App (SwiftUI)        │
+│                     │      │                                  │
+│  users              │◄────►│  MenuBrowsingView  (Menu tab)    │
+│  favorites          │      │  FavoritesView     (Favorites)   │
+│  daily_menus        │      │  ItemCatalogView   (Discover)    │
+└─────────────────────┘      └──────────────────────────────────┘
+                                          │
+                              ┌───────────▼──────────┐
+                              │  APNs (Apple)        │
+                              │  sandbox / production│
+                              └──────────────────────┘
 ```
 
 ### Why the iOS app never touches the Brown API directly
@@ -135,7 +159,7 @@ The worker fetches this **once per day**, parses it, and writes only the relevan
 |---|---|---|
 | `id` | UUID PK | Set to `DeviceID.current` from the iOS app |
 | `created_at` | TIMESTAMPTZ | Auto |
-| `apn_token` | TEXT | Apple Push token — populated later |
+| `apn_token` | TEXT | Apple Push token — uploaded by `AppDelegate` on registration |
 
 ### `favorites`
 | Column | Type | Notes |
@@ -177,16 +201,52 @@ Requires a `.env` file in the project root:
 ```
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-service-role-key
+APNS_KEY_ID=XXXXXXXXXX
+APNS_TEAM_ID=XXXXXXXXXX
+APNS_BUNDLE_ID=your.bundle.id
+APNS_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----
+APNS_SANDBOX=true
 ```
 
 Use the **`service_role`** key (not the anon key) — it bypasses RLS so the worker can read all users and write to `daily_menus`.
 
-The worker:
-1. Hits the Brown Dining API
-2. Parses ~430 recipe items for today
-3. Deletes stale `daily_menus` rows from previous days
-4. Upserts today's rows in batches of 400
-5. Loads all favorites and prints a match log
+**Environment variable notes:**
+- `APNS_SANDBOX=true` (default) → `api.sandbox.push.apple.com` — use for Xcode dev builds
+- `APNS_SANDBOX=false` → `api.push.apple.com` — use for App Store / TestFlight
+- `FORCE_NOTIFY=true` → skip the meal-time window check and send notifications for the nearest meal period (set automatically by cron-job.org triggers)
+- `APNS_PRIVATE_KEY` in `.env`: use literal `\n` between lines (single-line value). GitHub Actions secrets use real newlines — both are handled.
+
+---
+
+## Scheduling
+
+The worker runs on two different triggers:
+
+### 1. Daily menu sync — GitHub Actions `schedule`
+Cron: `0 7 * * *` UTC = **2:00 AM ET**. Fetches and stores today's menu. No notifications sent (no meal period is upcoming at 2 AM). This run is fine if GitHub delays it by up to an hour.
+
+### 2. Meal-time notifications — cron-job.org → `workflow_dispatch`
+Three jobs on [cron-job.org](https://cron-job.org), each POSTing to the GitHub API at exact times (timezone: `America/New_York`):
+
+| Meal | crontab | ET time |
+|---|---|---|
+| Breakfast | `25 7 * * *` | 7:25 AM |
+| Lunch | `55 10 * * *` | 10:55 AM |
+| Dinner | `55 16 * * *` | 4:55 PM |
+
+Each job POSTs:
+```
+POST https://api.github.com/repos/michael-xu25/bear-bites/actions/workflows/daily_worker.yml/dispatches
+Authorization: Bearer <github_pat_with_workflow_scope>
+Accept: application/vnd.github.v3+json
+Content-Type: application/json
+
+{"ref": "main", "inputs": {"force_notify": "true"}}
+```
+
+**When cron-job.org calls, `FORCE_NOTIFY=true` is passed to the worker**, which bypasses the time-window check and dispatches notifications for the nearest meal period. This is necessary because GitHub job startup takes ~30 seconds and could push the run outside the normal ±20-minute window.
+
+**The cron-job.org setup never needs to change** unless you rename the workflow file or move the repo. Code changes to `worker.py` are picked up automatically on the next run.
 
 ---
 
@@ -195,45 +255,41 @@ The worker:
 ### First-time setup
 
 1. Open `BearBitesApp/Bear Bites.xcodeproj` in Xcode
-2. In the top toolbar, click the destination selector (it says "Any iOS Device" by default) and pick a **simulator** like "iPhone 17 Pro"
+2. In the top toolbar, click the destination selector and pick your device or a simulator
 3. Hit **Cmd+R** or the ▶ play button to build and run
 
-### Running on a real device
+### Running on a real device (required for push notifications)
+
+Push notifications do not work in the simulator. For APNs:
 
 1. Connect your iPhone with a **data cable** (not a charge-only cable — if the "Trust This Computer?" prompt never appears, the cable is charge-only)
 2. Unlock your phone and tap **Trust** when prompted
 3. Go to **Settings → Privacy & Security → Developer Mode** and enable it
-4. Your device will appear in the destination selector — select it and hit ▶
+4. In Xcode → Signing & Capabilities, select your Apple Developer team
+5. Your device will appear in the destination selector — select it and hit ▶
 
 ### The preview canvas vs running the app
 
-The **preview canvas** (right panel in Xcode) is a static sandbox. It renders the UI but **cannot make network calls**. Hearts won't fire, menus won't load. Always use **Cmd+R** to run in the full simulator or on a device for any feature that touches Supabase.
+The **preview canvas** (right panel in Xcode) is a static sandbox. It renders the UI but **cannot make network calls**. Hearts won't fire, menus won't load. Always use **Cmd+R** for any feature that touches Supabase.
 
 ### Clean build
 
-If the app seems to be running old code after changes, do:
+If the app seems to be running old code after changes:
 **Product → Clean Build Folder** (Cmd+Shift+K), then **Cmd+R**.
 
 ---
 
 ## Agent Notes: Supabase Quick Reference
 
-- Anonymous auth works but must be explicitly enabled in Supabase Dashboard → Authentication → Providers → Anonymous. Wait ~30 seconds after saving before testing — settings take time to propagate. Verify it's live with:
-  ```bash
-  curl -X POST "https://urfgilgpmacqslxfnrtz.supabase.co/auth/v1/signup" \
-    -H "apikey: YOUR_ANON_KEY" \
-    -H "Content-Type: application/json" \
-    -d '{}'
-  ```
-  If it returns an `access_token`, anonymous auth is live. If it returns an error, the setting hasn't propagated yet.
+- Always upsert into `users` before inserting into `favorites` due to the FK constraint (`favorites.user_id → users.id`). If you skip this, every favorites insert will fail with `violates foreign key constraint`. Both `AddFavoriteView` and `MenuBrowsingView` call `registerDevice()` before any favorites write.
 
-- Always upsert into `users` before inserting into `favorites` due to the FK constraint (`favorites.user_id → users.id`). If you skip this, every favorites insert will fail with `violates foreign key constraint`.
-
-- RLS is currently **disabled** on `users` and `favorites`. Re-enable it when real anonymous auth is wired up — the policies are already written in `supabase_schema.sql` and just need to be switched back on.
+- RLS is currently **disabled** on `users` and `favorites`. Re-enable it when real anonymous auth is wired up — the policies are already written in `supabase_schema.sql`.
 
 - `daily_menus` has RLS **enabled** with a public read policy. The worker writes to it using the `service_role` key which bypasses RLS entirely. The iOS app reads it with the anon key.
 
-- The `service_role` key is in `.env` (backend only). The `anon` key is in `SupabaseManager.swift` (iOS app). Never swap these.
+- The `service_role` key is in `.env` / GitHub Actions secrets (backend only). The `anon` key is hardcoded in `SupabaseManager.swift` (iOS app). Never swap these.
+
+- The Supabase project URL is `https://urfgilgpmacqslxfnrtz.supabase.co`.
 
 ---
 
@@ -241,11 +297,11 @@ If the app seems to be running old code after changes, do:
 
 This project uses **Xcode 16's automatic filesystem sync** (`PBXFileSystemSynchronizedRootGroup`). This means:
 
-**Any `.swift` file placed inside `BearBitesApp/Bear Bites/` on disk is automatically compiled** — you do not need to manually add files to `project.pbxproj`. There is no `AddFavoriteView` entry in the project file; Xcode picks it up from the directory.
+**Any `.swift` file placed inside `BearBitesApp/Bear Bites/` on disk is automatically compiled** — you do not need to manually add files to `project.pbxproj`.
 
 ### What this means for an AI agent
 
-- Edit files directly at their path on disk (e.g. `BearBitesApp/Bear Bites/MenuBrowsingView.swift`). Xcode will detect the change and recompile on the next build.
+- Edit files directly at their path on disk. Xcode will detect the change and recompile on the next build.
 - To create a new Swift view, write it to the correct folder. Xcode will include it automatically.
 - **Do not** try to patch `project.pbxproj` to register files — it is not needed.
 - After editing, the user must hit **Cmd+R** in Xcode to rebuild. If changes don't seem to take effect, suggest **Cmd+Shift+K** (Clean) then **Cmd+R**.
@@ -253,33 +309,27 @@ This project uses **Xcode 16's automatic filesystem sync** (`PBXFileSystemSynchr
 ### Known gotchas
 
 - **Smart quotes and curly apostrophes** (`"`, `"`, `'`, `…`) inside Swift string literals cause `Consecutive statements on a line must be separated by ';'` compile errors. Always use straight ASCII characters in Swift files.
-- The **Supabase Swift SDK warns** about `emitLocalSessionAsInitialSession` on launch unless `autoRefreshToken: false` is set in `SupabaseClientOptions`. This is set in `SupabaseManager.swift`.
 - **`DeviceID`** is defined in `SupabaseManager.swift` and shared across all views. Do not redefine it locally in individual views.
-- **Foreign key constraint**: inserting into `favorites` requires a matching row in `users` first. `AddFavoriteView` and `MenuBrowsingView` both call `registerDevice()` which upserts into `users` before any favorites insert.
+- **Foreign key constraint**: inserting into `favorites` requires a matching row in `users` first.
+- **`SupabaseManager.withRetry()`**: wrap all Supabase write calls (save/delete favorite) in this helper. It retries up to 3× with exponential backoff on transient `NSURLErrorDomain` codes (`-1005`, `-1001`, `-1004`, `-1009`, `-1020`). Non-network errors propagate immediately.
+- **URLSession config**: `SupabaseManager` passes a custom `URLSession` to the Supabase client with `waitsForConnectivity = true` and a 60 s resource timeout. This silently absorbs brief cellular dropouts before they ever become errors.
+- The **Supabase Swift SDK** emits a startup warning unless `autoRefreshToken: false` and `emitLocalSessionAsInitialSession: true` are both set in `SupabaseClientOptions.AuthOptions`. Both are set in `SupabaseManager.swift`.
 
 ---
 
 ## Remaining Roadmap
 
-### Next: Favorites List View
-A screen showing everything the user has favorited, with a delete button. Query `favorites` filtered by `DeviceID.current`.
+### Next: Sync the full week's menu (not just today)
 
-### After that: Real Auth
-Replace `DeviceID` (UserDefaults UUID) with `supabase.auth.signInAnonymously()`. Re-enable RLS on `users` and `favorites`. The anonymous auth approach was designed for this from the start — the `users.id` primary key equals the Supabase Auth UUID, so the switch is clean.
+The Brown Dining API returns a full week of upcoming menus in a single response. Currently the worker only parses and stores **today's** date. The Discover catalog would be far more useful if it showed items from the entire upcoming week — users could favorite a dish they see scheduled for Thursday before it arrives. This requires iterating over all date keys in the API response instead of only `TODAY`, and syncing all of them into `daily_menus`.
 
 ### Optional account sign-in (Google / Sign in with Apple)
-Give users the option to link their anonymous device account to a Google or Apple ID so their favorites sync across devices. Device-local favorites remain the default — sign-in is never required. When a user signs in, migrate their existing device favorites to the authenticated account.
+Give users the option to link their anonymous device account to a Google or Apple ID so their favorites sync across devices. Device-local favorites remain the default — sign-in is never required.
 
 ### Recommendations (suggested favorites)
-Show a curated "Start here" section at the top of the Discover tab with crowd-sourced popular dishes — e.g. Yakisoba Noodle, Ivy Room Big Burger, Egg Fried Rice, Bulgogi Chicken, Dry Noodle, Friday V-Dub Lunch Fried Chicken, Cheesecake. New users can set up meaningful favorites in seconds without needing to know exact menu item names. Tapping a suggestion hearts it just like browsing the catalog normally.
-
-### Then: Push Notifications
-1. Request APNs permission on app launch
-2. Upload the device token to `users.apn_token`
-3. In `worker.py`, replace the `print()` match log with real APNs HTTP/2 calls using the `.p8` auth key
+Show a curated "Start here" section at the top of the Discover tab with crowd-sourced popular dishes — e.g. Yakisoba Noodle, Ivy Room Big Burger, Egg Fried Rice, Bulgogi Chicken, Dry Noodle, Friday V-Dub Lunch Fried Chicken, Cheesecake. New users can set up meaningful favorites in seconds without needing to know exact menu item names.
 
 ### Polish
-- Search across today's menu
 - Allergen filter
 - Hall and meal period filter
 - Home screen widget
@@ -305,7 +355,7 @@ Show a curated "Start here" section at the top of the Discover tab with crowd-so
 
 **Endpoint:** `GET https://esb-level1.brown.edu/services/oit/sys/brown-dining/v1/menus`
 
-Returns a JSON array of 7 location objects covering a full week of menus.
+Returns a JSON array of 7 location objects covering a full **week** of menus (today + upcoming days).
 
 ```
 Array (7 locations)
@@ -328,6 +378,8 @@ Array (7 locations)
 ```
 
 Filter `itemType == "recipe"` to skip raw ingredients like "Butter" and "Salt".
+
+The `meals` object contains keys for multiple dates — currently the worker only reads `TODAY`. The next task is to read **all available date keys** so the full week is synced.
 
 ---
 
