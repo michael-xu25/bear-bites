@@ -48,6 +48,7 @@ enum SupabaseManager {
     // re-thrown immediately without retrying.
     // -------------------------------------------------------------------------
 
+    @discardableResult
     static func withRetry<T>(
         maxAttempts: Int = 3,
         operation: () async throws -> T

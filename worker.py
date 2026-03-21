@@ -118,84 +118,117 @@ def get_upcoming_meal_period() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_menus(url: str = DINING_API_URL) -> list:
+def fetch_menus(url: str = DINING_API_URL, max_attempts: int = 5) -> list:
     """
-    Download and decode the Brown Dining JSON payload.
+    Download and decode the Brown Dining JSON payload (~2.5 MB).
+
+    Retries on transient failures (timeouts, 5xx, connection errors) with
+    exponential backoff so a flaky network or brief Brown API hiccup does
+    not fail the whole GitHub Actions / cron run.
 
     Returns the top-level list of location objects (one per dining hall).
-    Raises requests.HTTPError on a non-2xx response and requests.ConnectionError
-    on network failure — both should be caught and retried by the caller
-    or the surrounding scheduler.
     """
-    log.info("Fetching Brown Dining API: %s", url)
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    locations: list = response.json()
-    log.info("Received %d location object(s) from the API.", len(locations))
-    return locations
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            log.info("Fetching Brown Dining API (attempt %d/%d): %s", attempt, max_attempts, url)
+            # Large JSON — allow a generous read timeout.
+            response = requests.get(url, timeout=(15, 120))
+            response.raise_for_status()
+            locations: list = response.json()
+            log.info("Received %d location object(s) from the API.", len(locations))
+            return locations
+        except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as exc:
+            last_error = exc
+            status = getattr(exc.response, "status_code", None) if isinstance(exc, requests.HTTPError) else None
+            if status is not None and status < 500 and status != 429:
+                raise
+            wait = min(2**attempt, 60)
+            log.warning(
+                "Brown API fetch failed (attempt %d/%d): %s — retrying in %ds",
+                attempt,
+                max_attempts,
+                exc,
+                wait,
+            )
+            if attempt < max_attempts:
+                time.sleep(wait)
+        except ValueError as exc:
+            # response.json() failed — bad payload; retry once more in case of partial read.
+            last_error = exc
+            wait = min(2**attempt, 30)
+            log.warning("JSON decode failed (attempt %d/%d): %s — retrying in %ds", attempt, max_attempts, exc, wait)
+            if attempt < max_attempts:
+                time.sleep(wait)
+
+    assert last_error is not None
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Parse today's menu
+# Step 2 — Parse the full week's menus
 # ---------------------------------------------------------------------------
 
 
-def parse_todays_menu(locations: list, today: str = TODAY) -> list[dict]:
+def parse_week_menus(locations: list) -> list[dict]:
     """
     Walk the full API payload and return a flat list of every *recipe* item
-    being served today across all dining halls and all meal periods.
+    across ALL date keys present in the response (today + upcoming days).
 
     Each element in the returned list is a dict with these keys:
-        food_item     — canonical item name from the API  (str)
-        location_id   — short hall ID, e.g. "SHRP"       (str)
-        location_name — display name, e.g. "Sharpe Refectory" (str)
-        meal_period   — "Breakfast", "Lunch", or "Dinner" (str)
-        station       — station name, e.g. "Soups"        (str)
+        date          — "YYYY-MM-DD" string from the API key   (str)
+        food_item     — canonical item name from the API        (str)
+        location_id   — short hall ID, e.g. "SHRP"             (str)
+        location_name — display name, e.g. "Sharpe Refectory"  (str)
+        meal_period   — "Breakfast", "Lunch", or "Dinner"       (str)
+        station       — station name, e.g. "Soups"              (str)
 
-    Items whose itemType != "recipe" are skipped; this filters out raw
-    ingredients that appear on the line e.g. "Butter", "Salt" etc.
+    Items whose itemType != "recipe" are skipped (filters out raw
+    ingredients like "Butter" and "Salt").
     """
     entries: list[dict] = []
 
     for location in locations:
         loc_id: str = location.get("locationId", "UNKNOWN")
         loc_name: str = location.get("name", "Unknown Hall")
+        meals_by_date: dict = location.get("meals", {})
 
-        # The API payload spans a full week; grab only today's date key.
-        day_meals: list = location.get("meals", {}).get(today, [])
+        for date_key, day_meals in meals_by_date.items():
+            if not day_meals:
+                continue
 
-        if not day_meals:
-            log.debug("No meals for %s (%s) on %s — skipping.", loc_name, loc_id, today)
-            continue
+            for meal_period_obj in day_meals:
+                period: str = meal_period_obj.get("meal", "Unknown")
+                stations: list = meal_period_obj.get("menu", {}).get("stations", [])
 
-        for meal_period_obj in day_meals:
-            period: str = meal_period_obj.get("meal", "Unknown")  # Breakfast/Lunch/Dinner
-            stations: list = meal_period_obj.get("menu", {}).get("stations", [])
+                for station in stations:
+                    station_name: str = station.get("name", "Unknown Station")
 
-            for station in stations:
-                station_name: str = station.get("name", "Unknown Station")
+                    for item in station.get("items", []):
+                        if item.get("itemType") != "recipe":
+                            continue
 
-                for item in station.get("items", []):
-                    # Skip raw ingredients — we only care about named recipes.
-                    if item.get("itemType") != "recipe":
-                        continue
+                        food_name: str = item.get("item", "").strip()
+                        if not food_name:
+                            continue
 
-                    food_name: str = item.get("item", "").strip()
-                    if not food_name:
-                        continue
+                        entries.append(
+                            {
+                                "date": date_key,
+                                "food_item": food_name,
+                                "location_id": loc_id,
+                                "location_name": loc_name,
+                                "meal_period": period,
+                                "station": station_name,
+                            }
+                        )
 
-                    entries.append(
-                        {
-                            "food_item": food_name,
-                            "location_id": loc_id,
-                            "location_name": loc_name,
-                            "meal_period": period,
-                            "station": station_name,
-                        }
-                    )
-
+    dates_found = sorted({e["date"] for e in entries})
     log.info(
-        "Parsed %d recipe item(s) being served today (%s).", len(entries), today
+        "Parsed %d recipe item(s) across %d date(s): %s",
+        len(entries),
+        len(dates_found),
+        ", ".join(dates_found),
     )
     return entries
 
@@ -228,25 +261,31 @@ def build_menu_index(entries: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Sync today's menu into Supabase daily_menus
+# Step 3 — Sync the full week's menus into Supabase daily_menus
 # ---------------------------------------------------------------------------
 
 # Rows are batched to stay well under PostgREST's default request-size limit.
 _BATCH_SIZE = 400
 
 
-def sync_daily_menu(sb: Client, entries: list[dict], today: str = TODAY) -> None:
+def sync_daily_menu(sb: Client, entries: list[dict]) -> None:
     """
-    Persist today's parsed menu entries into the daily_menus table so the
-    iOS app can query Supabase instead of hitting the Brown Dining API directly.
+    Persist all parsed menu entries (today + upcoming days from the API) into
+    daily_menus, maintaining a rolling ~14-day window visible in the Discover
+    catalog: the past 7 days of history plus today plus ~6 upcoming days.
 
-    Two-phase approach:
-      1. DELETE rows older than 7 days, keeping a rolling week of data.
-         The iOS Discover tab reads from this 7-day window to build a
-         searchable catalog of all items users can favorite.
-      2. INSERT today's rows in batches of _BATCH_SIZE, using
-         ON CONFLICT DO NOTHING so re-running the worker mid-day is safe.
+    Three-phase approach:
+      1. DELETE rows older than 7 days (keeps the past-7-days history window).
+      2. For each date present in the new API data, DELETE its existing rows
+         so the fresh insert is a full replacement. This handles menu changes
+         (dishes swapped out, new items added) for any date — including future
+         dates that were saved by an earlier worker run.
+      3. INSERT all entries in batches of _BATCH_SIZE.
     """
+    if not entries:
+        log.warning("No menu entries to sync.")
+        return
+
     # ── Phase 1: prune rows older than 7 days ────────────────────────────────
     seven_days_ago = (
         datetime.now(ZoneInfo("America/New_York")) - timedelta(days=7)
@@ -262,37 +301,54 @@ def sync_daily_menu(sb: Client, entries: list[dict], today: str = TODAY) -> None
     if pruned:
         log.info("Pruned %d stale daily_menus row(s) from before %s.", pruned, seven_days_ago)
 
-    if not entries:
-        log.warning("No menu entries to sync for today (%s).", today)
-        return
+    # ── Phase 2: delete existing rows for every date we are about to insert ──
+    # This is a full replacement per date: stale entries (dishes removed from
+    # the menu since the last run) are cleared before the fresh data goes in.
+    dates_to_sync = sorted({e["date"] for e in entries})
+    for date in dates_to_sync:
+        sb.table("daily_menus").delete().eq("date", date).execute()
+    log.info(
+        "Cleared existing rows for %d date(s) before re-inserting: %s",
+        len(dates_to_sync),
+        ", ".join(dates_to_sync),
+    )
 
-    # ── Phase 2: insert today's menu ─────────────────────────────────────────
-    rows = [
-        {
-            "date":             today,
-            "dining_hall_id":   e["location_id"],
-            "dining_hall_name": e["location_name"],
-            "meal_period":      e["meal_period"],
-            "station":          e["station"],
-            "food_item":        e["food_item"],
-        }
-        for e in entries
-    ]
+    # ── Phase 3: insert fresh rows for all dates ──────────────────────────────
+    # Deduplicate before inserting. Two entries are considered the same dish if
+    # they share (date, dining_hall, meal_period, food_item) — station is
+    # intentionally excluded so a dish listed at multiple stations on the same
+    # day/meal collapses to one row. Entries on different dates or in different
+    # meal periods are always kept as separate rows so notifications fire
+    # independently for each applicable day and meal time.
+    seen_keys: set[tuple] = set()
+    rows: list[dict] = []
+    for e in entries:
+        key = (e["date"], e["location_id"], e["meal_period"], e["food_item"])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        rows.append(
+            {
+                "date":             e["date"],
+                "dining_hall_id":   e["location_id"],
+                "dining_hall_name": e["location_name"],
+                "meal_period":      e["meal_period"],
+                "station":          e["station"],
+                "food_item":        e["food_item"],
+            }
+        )
 
     inserted = 0
     for i in range(0, len(rows), _BATCH_SIZE):
         batch = rows[i : i + _BATCH_SIZE]
-        sb.table("daily_menus").upsert(
-            batch,
-            on_conflict="date,dining_hall_id,meal_period,station,food_item",
-        ).execute()
+        sb.table("daily_menus").insert(batch).execute()
         inserted += len(batch)
 
     log.info(
-        "Synced %d menu item(s) for %s into daily_menus (%d batch(es)).",
+        "Synced %d menu item(s) across %d date(s) into daily_menus (%d batch(es)).",
         inserted,
-        today,
-        -(-len(rows) // _BATCH_SIZE),  # ceiling division
+        len(dates_to_sync),
+        -(-len(rows) // _BATCH_SIZE),
     )
 
 
@@ -583,18 +639,32 @@ def main() -> None:
     sb: Client = create_client(supabase_url, supabase_key)
     log.info("Supabase client initialised (project: %s).", supabase_url)
 
-    # ── 2. Fetch and parse today's dining menu ───────────────────────────────
+    # ── 2. Fetch and parse the full week's dining menus ─────────────────────
     locations = fetch_menus()
-    menu_entries = parse_todays_menu(locations)
+    all_entries = parse_week_menus(locations)
 
-    if not menu_entries:
-        log.warning("No menu data found for today (%s). Exiting early.", TODAY)
+    if not all_entries:
+        log.warning("API returned no recipe rows — nothing to sync. Exiting.")
         return
 
-    menu_index = build_menu_index(menu_entries)
+    # ── 3. Sync full week into Supabase daily_menus ───────────────────────────
+    # Always sync whenever the API returned data, even if today's date key is
+    # missing (week rollover edge case, holiday, or API glitch). Previously we
+    # returned before sync when `todays_entries` was empty, which skipped the
+    # entire DB update and broke the Discover tab until the next successful run.
+    sync_daily_menu(sb, all_entries)
 
-    # ── 3. Sync today's menu into Supabase daily_menus ───────────────────────
-    sync_daily_menu(sb, menu_entries)
+    # Split: today's entries drive notifications only.
+    todays_entries = [e for e in all_entries if e["date"] == TODAY]
+
+    if not todays_entries:
+        log.warning(
+            "No menu data for today (%s) — DB updated for other dates; skipping notifications.",
+            TODAY,
+        )
+        return
+
+    menu_index = build_menu_index(todays_entries)
 
     # ── 4. Load user favorites from Supabase ─────────────────────────────────
     favorites = load_favorites(sb)

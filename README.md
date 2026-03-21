@@ -30,7 +30,7 @@ BearBites is an iOS app that sends Brown University students a push notification
 | Component | Status | Description |
 |---|---|---|
 | Supabase database | ✅ Done | 3 tables: `users`, `favorites`, `daily_menus` |
-| `worker.py` | ✅ Done | Fetches Brown API, parses today's menu, syncs to `daily_menus`, matches favorites, sends APNs push notifications |
+| `worker.py` | ✅ Done | Fetches Brown API, parses full week's menus (today + ~6 upcoming days), syncs to `daily_menus` with per-date replace, matches today's menu against favorites, sends APNs push notifications |
 | GitHub Actions + cron-job.org | ✅ Done | Worker runs automatically: 2 AM ET for menu sync, and via cron-job.org at 7:25 AM / 10:55 AM / 4:55 PM ET for meal-time notifications |
 | APNs push notifications | ✅ Done | End-to-end: iOS app registers device token → uploaded to `users.apn_token` → worker sends ES256-signed HTTP/2 pushes via `api.sandbox.push.apple.com` |
 | `SupabaseManager.swift` | ✅ Done | Shared Supabase client + `DeviceID` + `withRetry()` helper for transient network errors |
@@ -117,8 +117,8 @@ cron-job.org (7:25 AM / 10:55 AM / 4:55 PM ET)
 │           worker.py  (GitHub Actions)           │
 │                                                 │
 │  1. Fetch Brown Dining API (2.5 MB JSON)        │
-│  2. Parse today's recipes                       │
-│  3. Sync → Supabase daily_menus (7-day window)  │
+│  2. Parse all dates (today + ~6 upcoming)        │
+│  3. Sync → Supabase daily_menus (~14-day window) │
 │  4. Load user favorites + APN tokens            │
 │  5. Cross-reference favorites vs today's menu   │
 │  6. Filter to upcoming meal period              │
@@ -248,6 +248,15 @@ Content-Type: application/json
 
 **The cron-job.org setup never needs to change** unless you rename the workflow file or move the repo. Code changes to `worker.py` are picked up automatically on the next run.
 
+### Troubleshooting: scheduled workflow or cron-job failed
+
+| Symptom | Likely cause | Mitigation (in repo) |
+|--------|----------------|----------------------|
+| Job fails only on `schedule` (2 AM), not on manual **Run workflow** | `FORCE_NOTIFY` was bound to `github.event.inputs.force_notify` — **inputs are null** when the trigger is `schedule`, which can break env evaluation. | Workflow sets `FORCE_NOTIFY` only when `github.event_name == 'workflow_dispatch'`, else `'false'`. |
+| Worker exits before syncing `daily_menus` | Old logic returned early when **today** had no rows in the API (week rollover / glitch), **before** `sync_daily_menu` ran. | Worker always runs `sync_daily_menu` when the API returns any recipe rows; notifications are skipped only if today is empty. |
+| Intermittent failure with no code change | Brown API timeout or 5xx on a ~2.5 MB response. | `fetch_menus()` retries with backoff and a longer read timeout (120 s). |
+| GitHub: “scheduled workflows disabled” | Repo had **no commits for 60+ days** — GitHub auto-disables `schedule` until re-enabled in Actions tab. | Push any commit or re-enable workflows in **Actions** → **Daily Menu Sync** → … menu. |
+
 ---
 
 ## Xcode Guide
@@ -319,9 +328,20 @@ This project uses **Xcode 16's automatic filesystem sync** (`PBXFileSystemSynchr
 
 ## Remaining Roadmap
 
-### Next: Sync the full week's menu (not just today)
+### ~~Sync the full week's menu~~ ✅ Done
 
-The Brown Dining API returns a full week of upcoming menus in a single response. Currently the worker only parses and stores **today's** date. The Discover catalog would be far more useful if it showed items from the entire upcoming week — users could favorite a dish they see scheduled for Thursday before it arrives. This requires iterating over all date keys in the API response instead of only `TODAY`, and syncing all of them into `daily_menus`.
+The worker now parses and stores **all date keys** from the API response (today + ~6 upcoming days) instead of only today. `parse_week_menus()` iterates every date key in the API payload; `sync_daily_menu()` does a **per-date DELETE + re-INSERT** on every sync run.
+
+**Why per-date DELETE + re-INSERT (not upsert):**
+Brown Dining occasionally swaps dishes in or out of a future date's menu between now and when that date arrives. A simple `ON CONFLICT DO NOTHING` would leave stale rows from earlier runs. By deleting all rows for a date before re-inserting, the DB always reflects the latest version of what the API says is planned.
+
+**The resulting ~14-day Discover window:**
+- **Past 7 days** — kept by the prune step (`DELETE WHERE date < 7 days ago`)
+- **Today + ~6 upcoming days** — written fresh on every run from the API
+
+The `daily_menus` table now gives the Discover tab a rolling window of roughly two weeks: recent history so users can find dishes they just saw, plus the upcoming week so users can pre-favorite something before it arrives.
+
+**Notifications are unaffected:** `main()` splits the parsed results — all dates go to `sync_daily_menu`, but only today's entries are passed to `build_menu_index` and the notification matching steps.
 
 ### Optional account sign-in (Google / Sign in with Apple)
 Give users the option to link their anonymous device account to a Google or Apple ID so their favorites sync across devices. Device-local favorites remain the default — sign-in is never required.
@@ -379,7 +399,7 @@ Array (7 locations)
 
 Filter `itemType == "recipe"` to skip raw ingredients like "Butter" and "Salt".
 
-The `meals` object contains keys for multiple dates — currently the worker only reads `TODAY`. The next task is to read **all available date keys** so the full week is synced.
+The `meals` object contains keys for multiple dates. The worker reads **all available date keys** via `parse_week_menus()` and syncs every date into `daily_menus` on each run.
 
 ---
 

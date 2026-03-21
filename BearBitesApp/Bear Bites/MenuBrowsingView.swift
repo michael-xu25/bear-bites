@@ -196,6 +196,9 @@ struct MenuBrowsingView: View {
                 .value
 
             items = response
+        } catch is CancellationError {
+            // Task was cancelled because the view disappeared — not an error.
+            return
         } catch {
             errorMessage = error.localizedDescription
         }

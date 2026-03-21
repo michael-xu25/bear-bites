@@ -176,15 +176,31 @@ struct ItemCatalogView: View {
     }
 
     private func fetchCatalogItems() async {
+        // Supabase PostgREST has a server-side max-rows cap of 1000.
+        // Paginate in pages of 1000 until a short page signals the end.
         do {
-            let rows: [CatalogItem] = try await SupabaseManager.client
-                .from("daily_menus")
-                .select("food_item, dining_hall_id, dining_hall_name")
-                .order("food_item", ascending: true)
-                .execute()
-                .value
+            var accumulated: [CatalogItem] = []
+            let pageSize = 1000
+            var from = 0
 
-            allItems = rows
+            while true {
+                let page: [CatalogItem] = try await SupabaseManager.client
+                    .from("daily_menus")
+                    .select("food_item, dining_hall_id, dining_hall_name")
+                    .order("food_item", ascending: true)
+                    .range(from: from, to: from + pageSize - 1)
+                    .execute()
+                    .value
+
+                accumulated.append(contentsOf: page)
+                if page.count < pageSize { break }
+                from += pageSize
+            }
+
+            allItems = accumulated
+        } catch is CancellationError {
+            // Task was cancelled because the view disappeared — not an error.
+            return
         } catch {
             errorMessage = error.localizedDescription
         }

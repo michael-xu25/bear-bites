@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # FORCE_NOTIFY: only set for workflow_dispatch (cron-job.org meal runs).
+      # On `schedule` (2 AM sync), github.event.inputs is null — referencing
+      # .force_notify directly used to leave FORCE_NOTIFY unset or break eval.
       - name: Run worker
         run: python worker.py
         env:
@@ -39,4 +42,4 @@ jobs:
           APNS_TEAM_ID: ${{ secrets.APNS_TEAM_ID }}
           APNS_BUNDLE_ID: ${{ secrets.APNS_BUNDLE_ID }}
           APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
-          FORCE_NOTIFY: ${{ github.event.inputs.force_notify }}
+          FORCE_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_notify || 'false' }}
