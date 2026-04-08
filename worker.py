@@ -203,11 +203,27 @@ def parse_week_menus(locations: list) -> list[dict]:
 
                 for station in stations:
                     station_name: str = station.get("name", "Unknown Station")
+                    all_items: list = station.get("items", [])
 
-                    for item in station.get("items", []):
-                        if item.get("itemType") != "recipe":
-                            continue
+                    # Prefer recipe-typed items. If the station has NO recipe
+                    # items at all, include every item as a fallback — Brown's
+                    # system occasionally mislabels a main dish (e.g. Yakisoba
+                    # Noodles, Vanilla Soft Serve) as "ingredient", which would
+                    # silently drop the whole station under a strict recipe-only
+                    # filter. Stations that legitimately mix recipes + ingredients
+                    # (salad bars, sandwich bars) always have at least one recipe
+                    # item, so they are unaffected by this fallback.
+                    recipe_items = [i for i in all_items if i.get("itemType") == "recipe"]
+                    selected_items = recipe_items if recipe_items else all_items
 
+                    if not recipe_items and all_items:
+                        log.debug(
+                            "Station %r at %s (%s %s) has no recipe items — "
+                            "including %d ingredient item(s) as fallback.",
+                            station_name, loc_id, date_key, period, len(all_items),
+                        )
+
+                    for item in selected_items:
                         food_name: str = item.get("item", "").strip()
                         if not food_name:
                             continue
