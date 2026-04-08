@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BearBites Privacy Policy</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 700px;
+      margin: 48px auto;
+      padding: 0 24px;
+      color: #1a1a1a;
+      line-height: 1.7;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 4px; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    p, li { font-size: 0.97rem; color: #333; }
+    ul { padding-left: 1.4rem; }
+    a { color: #1a56db; }
+    .updated { color: #666; font-size: 0.88rem; margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>BearBites Privacy Policy</h1>
+  <p class="updated">Last updated: April 2025</p>
+
+  <p>BearBites ("the app") is a push notification service that alerts Brown University students when
+  a dining hall menu item they have saved as a favorite is being served.</p>
+
+  <h2>What We Collect</h2>
+  <ul>
+    <li><strong>Anonymous device identifier.</strong> A random UUID is generated the first time you
+    open the app and stored locally on your device. It is never linked to your name, Apple ID,
+    email address, or any other identifying information.</li>
+    <li><strong>Apple Push Notification token.</strong> When you grant notification permission, iOS
+    provides a device token that lets us deliver push notifications to your device. This token is
+    stored alongside your anonymous device identifier in our database.</li>
+    <li><strong>Food favorites.</strong> The names of dining hall menu items you choose to favorite,
+    and optionally the dining hall you associated them with, are stored in our database and linked
+    to your anonymous device identifier.</li>
+  </ul>
+
+  <h2>What We Do Not Collect</h2>
+  <ul>
+    <li>Your name, email address, or Apple ID.</li>
+    <li>Your precise or approximate location.</li>
+    <li>Any device identifiers used for advertising or cross-app tracking (such as IDFA).</li>
+    <li>Browsing history, contacts, photos, or any data unrelated to dining favorites.</li>
+  </ul>
+
+  <h2>How We Use Your Data</h2>
+  <p>The data collected is used exclusively to send you push notifications when a favorited menu
+  item is served at a Brown University dining hall. We do not use your data for advertising,
+  analytics sold to third parties, or any purpose unrelated to the core app function.</p>
+
+  <h2>Data Storage</h2>
+  <p>Your anonymous identifier, push token, and favorites are stored in a
+  <a href="https://supabase.com" target="_blank">Supabase</a> database hosted in the United States.
+  Supabase is SOC 2 Type II certified. Dining menu data is sourced from the Brown University
+  Dining Services API and is not stored beyond a rolling 14-day window.</p>
+
+  <h2>Data Retention and Deletion</h2>
+  <p>Your data remains in the database as long as you use the app. To delete all data associated
+  with your device, remove all favorites using the Favorites tab, which will leave only your
+  anonymous device identifier and push token. To request full deletion of your record, contact us
+  at the email below.</p>
+
+  <h2>Third-Party Services</h2>
+  <ul>
+    <li><strong>Apple Push Notification service (APNs)</strong> — delivers notifications to your
+    device. Governed by Apple's Privacy Policy at
+    <a href="https://www.apple.com/legal/privacy/" target="_blank">apple.com/legal/privacy</a>.</li>
+    <li><strong>Supabase</strong> — database and backend hosting. Governed by the
+    <a href="https://supabase.com/privacy" target="_blank">Supabase Privacy Policy</a>.</li>
+    <li><strong>Brown University Dining Services API</strong> — source of publicly available menu
+    data. No user data is sent to this API.</li>
+  </ul>
+
+  <h2>Children's Privacy</h2>
+  <p>BearBites does not knowingly collect data from children under 13. The app is intended for
+  Brown University students.</p>
+
+  <h2>Changes to This Policy</h2>
+  <p>If this policy changes materially, we will update the "Last updated" date above. Continued use
+  of the app constitutes acceptance of the updated policy.</p>
+
+  <h2>Contact</h2>
+  <p>Questions or deletion requests: <a href="mailto:michael_xu@brown.edu">michael_xu@brown.edu</a></p>
+</body>
+</html>

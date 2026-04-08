@@ -353,7 +353,69 @@ Show a curated "Start here" section at the top of the Discover tab with crowd-so
 - Allergen filter
 - Hall and meal period filter
 - Home screen widget
-- TestFlight → App Store
+
+---
+
+## App Store Submission Checklist
+
+### One-time setup (do once, then it's automatic)
+
+| Step | Where | Notes |
+|------|-------|-------|
+| Add `APNS_SANDBOX` = `false` GitHub Actions secret | Repo → Settings → Secrets and variables → Actions | **Critical.** Without this, production app users receive silent notification failures. The worker defaults to sandbox mode if this var is missing. |
+| Enable GitHub Pages | Repo → Settings → Pages → Source: main branch, `/docs` folder | Hosts the privacy policy at `https://michael-xu25.github.io/bear-bites/privacy-policy.html` |
+| Create App Store Connect record | [appstoreconnect.apple.com](https://appstoreconnect.apple.com) → My Apps → + | Bundle ID: `Bricked-Labs.Bear-Bites` |
+
+### Privacy policy
+File is at `docs/privacy-policy.html`. Once GitHub Pages is enabled:
+```
+https://michael-xu25.github.io/bear-bites/privacy-policy.html
+```
+Paste this URL into App Store Connect → App Information → Privacy Policy URL.
+
+### Archive and upload (Xcode)
+1. Set scheme to **Any iOS Device (arm64)** (not a simulator).
+2. **Product → Archive**.
+3. Xcode Organizer opens → **Distribute App → App Store Connect → Upload**.
+4. Xcode automatically switches `aps-environment` from `development` to `production` during the Archive build via the App Store provisioning profile. No manual entitlement change needed.
+
+### App Store Connect metadata
+| Field | Suggested value |
+|-------|----------------|
+| Name | BearBites |
+| Subtitle | Brown Dining Notifications |
+| Category | Food & Drink |
+| Age Rating | 4+ (no objectionable content) |
+| Privacy Policy URL | `https://michael-xu25.github.io/bear-bites/privacy-policy.html` |
+| Description | See below |
+| Keywords | brown university, dining, meal, food, notification, ratty, andrews, campus |
+
+**Suggested description:**
+```
+Never miss your favorite meal at Brown.
+
+BearBites sends you a push notification the moment a dining hall is serving a meal you love. Set your favorites once — BearBites does the rest.
+
+HOW IT WORKS
+• Browse today's full menu across all Brown dining halls
+• Heart any dish to save it as a favorite
+• Discover items from the week ahead and pre-save them
+• Get notified at breakfast, lunch, and dinner when your favorites are on the menu
+
+COVERS ALL BROWN DINING HALLS
+Sharpe Refectory, Verney-Woolley, Andrews Commons, Josiah's, Blue Room, Ivy Room, and the School of Engineering cafe.
+
+No account required. No ads. No tracking.
+```
+
+### Screenshots (required: 6.7" iPhone)
+Xcode Simulator → iPhone 16 Pro Max. Capture:
+1. Today's Menu tab showing a grouped hall view with hearts
+2. Favorites tab with the "Up Next" upcoming meals section
+3. Discover tab with search active
+
+### TestFlight (do before App Store submission)
+After uploading the build, go to App Store Connect → TestFlight → add yourself as an internal tester first. Verify notifications arrive on a real device before submitting for App Store review.
 
 ---
 
