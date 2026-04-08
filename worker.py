@@ -249,6 +249,52 @@ def parse_week_menus(locations: list) -> list[dict]:
     return entries
 
 
+def parse_todays_all_items(locations: list, today: str = TODAY) -> list[dict]:
+    """
+    Return a flat list of EVERY item served today — recipe AND ingredient —
+    across all dining halls and meal periods.
+
+    Used exclusively to build the notification matching index so that a dish
+    the user has favorited is never silently missed because Brown's dining
+    system mislabeled it as "ingredient" instead of "recipe" on a given day.
+    The DB and Discover catalog are NOT affected (they still use the
+    recipe-filtered output of parse_week_menus).
+    """
+    entries: list[dict] = []
+
+    for location in locations:
+        loc_id: str = location.get("locationId", "UNKNOWN")
+        loc_name: str = location.get("name", "Unknown Hall")
+        day_meals: list = location.get("meals", {}).get(today, [])
+
+        for meal_period_obj in day_meals:
+            period: str = meal_period_obj.get("meal", "Unknown")
+            stations: list = meal_period_obj.get("menu", {}).get("stations", [])
+
+            for station in stations:
+                for item in station.get("items", []):
+                    food_name: str = item.get("item", "").strip()
+                    if not food_name:
+                        continue
+                    entries.append(
+                        {
+                            "food_item": food_name,
+                            "location_id": loc_id,
+                            "location_name": loc_name,
+                            "meal_period": period,
+                            "station": station.get("name", "Unknown Station"),
+                        }
+                    )
+
+    log.info(
+        "Parsed %d total item(s) for today (%s) including ingredients "
+        "(used for notification matching only).",
+        len(entries),
+        today,
+    )
+    return entries
+
+
 def build_menu_index(entries: list[dict]) -> dict:
     """
     Convert the flat list of menu entries into a two-level lookup dict for
@@ -670,9 +716,8 @@ def main() -> None:
     # entire DB update and broke the Discover tab until the next successful run.
     sync_daily_menu(sb, all_entries)
 
-    # Split: today's entries drive notifications only.
+    # Check today has data before attempting notifications.
     todays_entries = [e for e in all_entries if e["date"] == TODAY]
-
     if not todays_entries:
         log.warning(
             "No menu data for today (%s) — DB updated for other dates; skipping notifications.",
@@ -680,7 +725,13 @@ def main() -> None:
         )
         return
 
-    menu_index = build_menu_index(todays_entries)
+    # Build the notification index from ALL of today's items (recipe +
+    # ingredient) so a favorited dish is never missed due to Brown's system
+    # mislabeling it as "ingredient" on a given day. The DB and Discover
+    # catalog remain recipe-only via parse_week_menus — only the in-memory
+    # matching index is broadened here.
+    todays_all_items = parse_todays_all_items(locations)
+    menu_index = build_menu_index(todays_all_items)
 
     # ── 4. Load user favorites from Supabase ─────────────────────────────────
     favorites = load_favorites(sb)
