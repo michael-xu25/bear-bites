@@ -36,7 +36,7 @@ import logging
 import os
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -94,6 +94,26 @@ MEAL_START_TIMES_ET: dict[str, tuple[int, int]] = {
 # The meal-time cron triggers fire ~5 min before each meal; the window
 # is wider to absorb GitHub Actions scheduling jitter.
 _NOTIFY_WINDOW_MINUTES = 20
+
+# ---------------------------------------------------------------------------
+# Academic break periods — notifications are suppressed during these windows.
+# Menu syncing still runs so the app stays up to date.
+# Update each year when Brown publishes the academic calendar.
+# ---------------------------------------------------------------------------
+BREAK_PERIODS: list[tuple[date, date]] = [
+    # ── 2026-2027 Brown academic calendar ────────────────────────────────────
+    (date(2026, 5, 15),  date(2026, 9, 7)),    # Summer 2026
+    (date(2026, 11, 25), date(2026, 11, 29)),   # Thanksgiving 2026
+    (date(2026, 12, 21), date(2027, 1, 26)),    # Winter break 2026-27
+    (date(2027, 3, 27),  date(2027, 4, 4)),     # Spring break 2027
+    (date(2027, 5, 15),  date(2027, 9, 7)),     # Summer 2027 (fallback — update when calendar is published)
+]
+
+
+def is_break_today() -> bool:
+    """Return True if today falls within any academic break window."""
+    today = date.today()
+    return any(start <= today <= end for start, end in BREAK_PERIODS)
 
 
 def get_upcoming_meal_period() -> str | None:
@@ -459,25 +479,36 @@ def load_favorites(sb: Client) -> list[dict]:
     user_ids = list({row["user_id"] for row in favorites})
     user_response = (
         sb.table("users")
-        .select("id, apn_token")
+        .select("id, apn_token, notifications_paused")
         .in_("id", user_ids)
         .execute()
     )
-    # Build a { user_id → apn_token } map for O(1) lookup.
-    token_map: dict[str, str | None] = {
-        u["id"]: u.get("apn_token") for u in (user_response.data or [])
+    # Build a { user_id → user row } map for O(1) lookup.
+    user_map: dict[str, dict] = {
+        u["id"]: u for u in (user_response.data or [])
     }
 
-    # Merge the APN token into each favorites row.
+    # Merge the APN token into each favorites row, skipping users who have
+    # paused their notifications via the in-app toggle.
     enriched: list[dict] = []
+    skipped_users: set[str] = set()
     for row in favorites:
+        u = user_map.get(row["user_id"], {})
+        if u.get("notifications_paused", False):
+            skipped_users.add(row["user_id"])
+            continue
         enriched.append(
             {
                 "user_id": row["user_id"],
-                "apn_token": token_map.get(row["user_id"]),
+                "apn_token": u.get("apn_token"),
                 "food_item": row["food_item"],
                 "dining_hall_id": row.get("dining_hall_id"),  # None = any hall
             }
+        )
+
+    if skipped_users:
+        log.info(
+            "Skipped %d user(s) with notifications paused.", len(skipped_users)
         )
 
     return enriched
@@ -733,6 +764,14 @@ def main() -> None:
     if not todays_entries:
         log.warning(
             "No menu data for today (%s) — DB updated for other dates; skipping notifications.",
+            TODAY,
+        )
+        return
+
+    # ── 3b. Academic break gate ───────────────────────────────────────────────
+    if is_break_today():
+        log.info(
+            "Academic break period — menu synced, notifications suppressed for today (%s).",
             TODAY,
         )
         return
