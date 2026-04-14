@@ -84,9 +84,10 @@ TODAY: str = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
 # The Brown Dining API does not include schedule times, so these are
 # hardcoded based on typical hall hours.
 MEAL_START_TIMES_ET: dict[str, tuple[int, int]] = {
-    "Breakfast": (7, 30),
-    "Lunch":     (11, 0),
-    "Dinner":    (17, 0),
+    "Breakfast":  (7, 30),
+    "Lunch":      (11, 0),
+    "Dinner":     (17, 0),
+    "Late Night": (18, 0),   # Jo's opens at 6 pm — separate notification run
 }
 
 # Notification window: send if the meal starts within this many minutes.
@@ -637,14 +638,20 @@ def send_notifications(
                 "apns-push-type": "alert",
                 "apns-priority": "10",
             }
+            is_late_night = m["meal_period"] in ("Dinner", "Late Night") and m["location_id"] == "JOS"
+            notif_body = (
+                f"Jo's is open for late night — head over tonight!"
+                if is_late_night
+                else (
+                    f"{m['location_name']} is serving it for "
+                    f"{m['meal_period'].lower()} today."
+                )
+            )
             payload = {
                 "aps": {
                     "alert": {
                         "title": f"{m['food_item']} is on the menu!",
-                        "body": (
-                            f"{m['location_name']} is serving it for "
-                            f"{m['meal_period'].lower()} today."
-                        ),
+                        "body": notif_body,
                     },
                     "sound": "default",
                 }
@@ -768,7 +775,18 @@ def main() -> None:
         meal_period = get_upcoming_meal_period()
 
     if meal_period:
-        matches = [m for m in matches if m["meal_period"] == meal_period]
+        if meal_period == "Late Night":
+            # Jo's late-night entries may be stored as "Dinner" or "Late Night"
+            # in the DB depending on how Brown's API labels them that day.
+            # Match both so nothing slips through.
+            JOS_ID = "JOS"
+            matches = [
+                m for m in matches
+                if m["location_id"] == JOS_ID
+                and m["meal_period"] in ("Dinner", "Late Night")
+            ]
+        else:
+            matches = [m for m in matches if m["meal_period"] == meal_period]
         log.info(
             "Meal period: %s. Filtered to %d match(es) for notification.",
             meal_period,
