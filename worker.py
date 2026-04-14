@@ -229,13 +229,18 @@ def parse_week_menus(locations: list) -> list[dict]:
                         if not food_name:
                             continue
 
+                        # Jo's operates late-night only. Normalise any API period
+                        # label ("Dinner", "Late Night", etc.) to a single consistent
+                        # value so the iOS app can filter by one name reliably.
+                        saved_period = "Late Night" if loc_id == "JOS" else period
+
                         entries.append(
                             {
                                 "date": date_key,
                                 "food_item": food_name,
                                 "location_id": loc_id,
                                 "location_name": loc_name,
-                                "meal_period": period,
+                                "meal_period": saved_period,
                                 "station": station_name,
                             }
                         )
@@ -775,18 +780,7 @@ def main() -> None:
         meal_period = get_upcoming_meal_period()
 
     if meal_period:
-        if meal_period == "Late Night":
-            # Jo's late-night entries may be stored as "Dinner" or "Late Night"
-            # in the DB depending on how Brown's API labels them that day.
-            # Match both so nothing slips through.
-            JOS_ID = "JOS"
-            matches = [
-                m for m in matches
-                if m["location_id"] == JOS_ID
-                and m["meal_period"] in ("Dinner", "Late Night")
-            ]
-        else:
-            matches = [m for m in matches if m["meal_period"] == meal_period]
+        matches = [m for m in matches if m["meal_period"] == meal_period]
         log.info(
             "Meal period: %s. Filtered to %d match(es) for notification.",
             meal_period,
